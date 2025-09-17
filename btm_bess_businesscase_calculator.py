@@ -20,7 +20,7 @@ def get_user_inputs():
     capacity_kwh = max_power_kw * duration_hrs
 
     st.sidebar.subheader("Efficiencies")
-    eta_ch = st.sidebar.number_input("Charging/discharging efficiency ", value=0.95, min_value=0.5, max_value=1.0, step=0.01)
+    eta = st.sidebar.number_input("Charging/discharging efficiency ", value=0.95, min_value=0.5, max_value=1.0, step=0.01)
 
     st.sidebar.subheader("SoC / operational settings")
     soc_init = st.sidebar.number_input("Start SoC (kWh)", value=capacity_kwh * 0.5)
@@ -42,7 +42,7 @@ def get_user_inputs():
 
     # Keep uploader out of sidebar per your request (we'll use main page uploader).
     return dict(ptu_count=ptu_count, dt=dt, max_power_kw=max_power_kw, duration_hrs=duration_hrs, capacity_kwh=capacity_kwh,
-                eta_ch=eta_ch, eta_dis=eta_dis, soc_init=soc_init, soc_min=soc_min, end_of_day_soc_enforced=end_of_day_soc_enforced,
+                eta=eta, soc_init=soc_init, soc_min=soc_min, end_of_day_soc_enforced=end_of_day_soc_enforced,
                 import_cap=import_cap, export_cap=export_cap, grid_energy_fee=grid_energy_fee, demand_charge=demand_charge,
                 use_fixed_feedin=use_fixed_feedin, fixed_feedin=fixed_feedin, epsilon=epsilon)
 
@@ -91,7 +91,7 @@ def generate_full_year_profiles(T, pv_max_kw, base_load, daytime_peak, evening_p
 
 
 
-def build_and_solve_lp(T, dt, load_profile, pv_profile, price_profile, feedin_profile, grid_fee_profile, params):
+def build_and_solve_lp(T, dt, load_profile, pv_profile, price_profile, feedin_profile, grid_fee_per_kwh, params):
     prob = LpProblem("BESS_day_opt_linear", LpMinimize)
 
     # Single battery power variable per PTU
@@ -110,9 +110,9 @@ def build_and_solve_lp(T, dt, load_profile, pv_profile, price_profile, feedin_pr
     # SoC dynamics (linear, symmetric efficiency)
     for t in range(T):
         if t == 0:
-            prob += SoC[0] == params['soc_init'] + params['eta_ch'] * P[0] * dt
+            prob += SoC[0] == params['soc_init'] + params['eta'] * P[0] * dt
         else:
-            prob += SoC[t] == SoC[t-1] + params['eta_ch'] * P[t] * dt
+            prob += SoC[t] == SoC[t-1] + params['eta'] * P[t] * dt
     if params['end_of_day_soc_enforced']:
         prob += SoC[T-1] == params['soc_init']
 
@@ -125,28 +125,28 @@ def build_and_solve_lp(T, dt, load_profile, pv_profile, price_profile, feedin_pr
     obj_terms = [
         lpSum(Import[t] * price_profile[t] * dt + 
             Export[t] * feedin_profile[t] * dt + 
-            Import[t] * grid_fee_profile[t] * dt
+            Import[t] * grid_fee_per_kwh[t] * dt
             )
         for t in range(T)
     ]
     obj_terms.append(params['demand_charge'] * Peak)
     prob += lpSum(obj_terms)
-    
+
     prob.solve()
 
-    results = build_and_solve_lp(
-        T=T_day,
-        dt=params['dt'],
-        load_profile=load,
-        pv_profile=pv,
-        price_profile=price,
-        feedin_profile=feedin,
-        grid_fee_profile=grid_fee,  # new argument
-        params=params_copy
-    )
+    results = {
+        'P': [v.varValue for v in P],
+        'SoC': [v.varValue for v in SoC],
+        'Import': [v.varValue for v in Import],
+        'Export': [v.varValue for v in Export],
+        'Peak': Peak.varValue,
+        'objective': value(prob.objective)
+    }
+
     return results
 
-def run_daily_optimisation(size_kw, load, pv, price, feedin, params):
+
+def run_daily_optimisation(size_kw, load, pv, price, feedin, grid_fee_per_kwh, params):
     """
     Run the single-day optimisation for a given battery size.
     """
@@ -162,8 +162,11 @@ def run_daily_optimisation(size_kw, load, pv, price, feedin, params):
         pv_profile=pv,
         price_profile=price,
         feedin_profile=feedin,
+        grid_fee_per_kwh=grid_fee_per_kwh,
         params=params_copy
     )
+
+
     return results
 
 def run_yearly_optimisation(sizes, df, params):
@@ -197,7 +200,7 @@ def run_yearly_optimisation(sizes, df, params):
             pv = df['pv'].values[idx]
             price = df['use_price'].values[idx]
             feedin = df['inject_price'].values[idx]
-
+            grid_fee_per_kwh = df['grid_fee'].values[idx]
             # --- no battery cost
             net_no_batt = load - pv
             import_no_batt = np.maximum(net_no_batt, 0)
@@ -210,7 +213,7 @@ def run_yearly_optimisation(sizes, df, params):
             )
 
             # --- with battery
-            results = run_daily_optimisation(size, load, pv, price, feedin, params)
+            results = run_daily_optimisation(size, load, pv, price, feedin, grid_fee_per_kwh, params)
             cost_with_batt = results['objective']
 
             total_cost_no_batt += cost_no_batt
