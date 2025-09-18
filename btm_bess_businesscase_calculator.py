@@ -17,37 +17,38 @@ import io
 def get_user_inputs():
     st.sidebar.header("Simulation settings")
     st.sidebar.write("Changing settings here will need a re-optimisation after.")
-
-    dt = st.sidebar.number_input("PTUs duration in hours ", value=0.25, max_value=1.)
-    ptu_count = 24./float(dt)
-
-    st.sidebar.subheader("Battery sizing")
-    duration_hrs = st.sidebar.number_input("Cycle duration (h)", value=2.0, step=0.5)
+    st.sidebar.subheader("Battery specs")
     price_eur_per_mw = float(st.sidebar.number_input("Battery CapEx (k€/mw)", value=700, step=10, format="%d"))*1000
     project_horizon_yrs = float(st.sidebar.number_input("Project horizon (yrs)", value=10, step=1, format="%d"))
+    # duration_hrs = st.sidebar.number_input("Fixed cycle duration", value=2., disabled=True)
+    # eta = st.sidebar.number_input("Charging/discharging efficiency", value=0.95, disabled=True)
+    # soc_min_pct = st.sidebar.number_input("Minimum SoC (%)", value=5, disabled=True)
+    # soc_max_pct = st.sidebar.number_input("Maximum SoC (%)", value=95, disabled=True)
 
-    st.sidebar.subheader("Efficiencies")
-    eta = st.sidebar.number_input("Charging/discharging efficiency ", value=0.95, min_value=0.5, max_value=1.0, step=0.01)
-
-    st.sidebar.subheader("SoC / operational settings")
+    st.sidebar.subheader("Operational settings")
     soc_init_pct = st.sidebar.number_input("Start SoC (%)", value=40, step=1, min_value=0, max_value=100, format="%d")
     st.sidebar.write("40% is roughly optimal for default settings for load, PV and duck curve prices.")
-    soc_min_pct = st.sidebar.number_input("Minimum SoC (%)", value=5, min_value=0, max_value=100, step=1, format="%d")
-    end_of_day_soc_enforced = st.sidebar.checkbox("Enforce end-of-day SoC = start SoC", value=True)
-
-
-    st.sidebar.subheader("Grid limits & fees")
     import_cap = st.sidebar.number_input("Import cap (mw)", value=50, step=1, format="%d")
     export_cap = st.sidebar.number_input("Export cap (mw)", value=50, step=1, format="%d")
     demand_charge = st.sidebar.number_input("Demand (peak) charge (k€/mw/yr) - currently not implemented", value=0, max_value=0, format="%d")*1000
 
+    with st.sidebar.expander("Fixed inputs", expanded=False):
+        st.write("These are the inputs we decided not to change for the experiments. They are implemented, so adjusting them will show the effect.")
+        duration_hrs = st.number_input("Cycle duration (h)", value=2.0, step=0.5)
+        eta = st.number_input("Charging/discharging efficiency ", value=0.95, min_value=0.5, max_value=1.0, step=0.01)
+        soc_min_pct = st.number_input("Minimum SoC (%)", value=5, min_value=0, max_value=40, step=1, format="%d")
+        soc_max_pct = st.number_input("Maximum SoC (%)", value=95, min_value=60, max_value=100, step=1, format="%d")
+        end_of_day_soc_enforced = st.checkbox("Enforce end-of-day SoC = start SoC", value=True)
+        dt = st.number_input("PTU duration in hours (only 0.25 is tested)", value=0.25, disabled=True)
+    
+    ptu_count = 24./float(dt)
 
     # Keep uploader out of sidebar per your request (we'll use main page uploader).
     return dict(
         ptu_count=ptu_count, dt=dt, 
         duration_hrs=duration_hrs, 
         eta=eta,
-        soc_init_pct=soc_init_pct, soc_min_pct=soc_min_pct,
+        soc_init_pct=soc_init_pct, soc_min_pct=soc_min_pct, soc_max_pct=soc_max_pct,
         end_of_day_soc_enforced=end_of_day_soc_enforced,project_horizon_yrs=project_horizon_yrs,
         import_cap=import_cap, export_cap=export_cap, demand_charge=demand_charge, price_eur_per_mw=price_eur_per_mw
     )
@@ -126,7 +127,7 @@ def build_and_solve_lp(T, dt, load_profile, pv_profile, price_profile, feedin_pr
     Peak = LpVariable("PeakImport", lowBound=0)
 
     # SoC
-    SoC = [LpVariable(f"SoC_{t}", lowBound=params['soc_min'], upBound=params['capacity_mwh']) for t in range(T)]
+    SoC = [LpVariable(f"SoC_{t}", lowBound=params['soc_min'], upBound=params['soc_max']) for t in range(T)]
 
     # SoC dynamics (linear, symmetric efficiency)
     for t in range(T):
@@ -150,7 +151,7 @@ def build_and_solve_lp(T, dt, load_profile, pv_profile, price_profile, feedin_pr
             )
         for t in range(T)
     ]
-    obj_terms.append(params['demand_charge'] * Peak / 365)  # daily share of annual demand charge
+    # obj_terms.append(params['demand_charge'] * Peak / 365)  # daily share of annual demand charge
     prob += lpSum(obj_terms)
 
     prob.solve()
@@ -179,6 +180,7 @@ def run_daily_optimisation(size_mw, load, pv, price, feedin, grid_fee_per_mwh, p
     # Recompute SoC values in MWh from percentages
     params_copy['soc_init'] = params_copy['soc_init_pct'] / 100.0 * params_copy['capacity_mwh']
     params_copy['soc_min']  = params_copy['soc_min_pct']  / 100.0 * params_copy['capacity_mwh']
+    params_copy['soc_max']  = params_copy['soc_max_pct']  / 100.0 * params_copy['capacity_mwh']
 
 
     results = build_and_solve_lp(
@@ -198,10 +200,22 @@ def run_daily_optimisation(size_mw, load, pv, price, feedin, grid_fee_per_mwh, p
 def run_yearly_optimisation(sizes, df, params):
     """
     Run optimisation for each battery size across all days.
-    Store detailed daily results only for the battery size with the best annual savings.
+    Returns:
+        summary_df: per-size annualised summary (operating + capex write-off)
+        daily_df: per-day detailed results (one row per day per size; costs are daily)
+        detailed_results: dict(day -> results) for the best size
+        best_size: size (MW) with highest annual savings
+    Notes:
+        - costs returned in summary_df are annualised (EUR / year).
+        - daily_df contains daily numbers (EUR per day) as produced during the simulation.
     """
     T_day = int(params['ptu_count'])
     n_days = int(len(df) // T_day)
+    if n_days <= 0:
+        raise ValueError("Input dataframe too short for the configured PTU count")
+
+    # If user runs only a single day for testing (n_days < 365) we scale daily totals to annual:
+    annual_multiplier = 365.0 / float(n_days)
 
     summary_records = []
     daily_records = []
@@ -216,9 +230,10 @@ def run_yearly_optimisation(sizes, df, params):
     step = 0
 
     for size in sizes:
-        total_cost_with_batt = 0.0
-        total_cost_no_batt = 0.0
-        daily_results_temp = {}  # temporary store results for this size
+        # accumulate daily operating costs (these are sums over the days present in df)
+        total_operating_cost_no_batt = 0.0
+        total_operating_cost_with_batt = 0.0
+        daily_results_temp = {}  # store per-day detailed results for this size
 
         for d in range(n_days):
             idx = slice(d * T_day, (d + 1) * T_day)
@@ -228,25 +243,26 @@ def run_yearly_optimisation(sizes, df, params):
             feedin = df['inject_price'].values[idx]
             grid_fee_per_mwh = df['grid_fee'].values[idx]
 
-            # --- no battery cost
+            # --- no battery cost for this day (daily EUR)
             net_no_batt = load - pv
-            import_no_batt = np.maximum(net_no_batt, 0)
-            export_no_batt = np.maximum(-net_no_batt, 0)
+            import_no_batt = np.maximum(net_no_batt, 0.0)
+            export_no_batt = np.maximum(-net_no_batt, 0.0)
             cost_no_batt = (
                 np.sum(import_no_batt * price * params['dt']) -
                 np.sum(export_no_batt * feedin * params['dt']) +
-                np.sum(import_no_batt * df['grid_fee'].values[idx] * params['dt']) +
-                params['demand_charge'] * np.max(import_no_batt) / 365
+                np.sum(import_no_batt * df['grid_fee'].values[idx] * params['dt'])
+                # demand charge handling is intentionally left out here; add appropriately if desired
             )
 
-            # --- with battery
+            # --- with battery (daily EUR) - result objective should be the day's operating cost
             results = run_daily_optimisation(size, load, pv, price, feedin, grid_fee_per_mwh, params)
             cost_with_batt = results['objective']
 
-            total_cost_no_batt += cost_no_batt
-            total_cost_with_batt += cost_with_batt
+            # accumulate daily totals
+            total_operating_cost_no_batt += cost_no_batt
+            total_operating_cost_with_batt += cost_with_batt
 
-            # store daily summary
+            # store daily summary (note: costs here are per-day)
             daily_records.append({
                 "day": d + 1,
                 "size_mw": size,
@@ -254,46 +270,54 @@ def run_yearly_optimisation(sizes, df, params):
                 "cost_with_batt": cost_with_batt,
                 "savings": cost_no_batt - cost_with_batt,
                 "peak_import_no_batt": np.max(import_no_batt),
-                "peak_import_with_batt": results['Peak']
+                "peak_import_with_batt": results.get('Peak')
             })
 
             # temporarily store detailed results for this size
             daily_results_temp[d+1] = results
 
-            # update progress bar
+            # update progress
             step += 1
             progress.progress(step / total_steps)
-            status_text.text(f"Battery size: {size} mw — Day {d+1} of {n_days}")
-        print("total_cost_no_batt", total_cost_no_batt)
-        print("total_cost_before", total_cost_with_batt)
-        total_cost_with_batt += params['price_eur_per_mw'] * size / params['project_horizon_yrs']  # include battery capital cost
-        print("total_cost_after", total_cost_with_batt)
-        print("added:", params['price_eur_per_mw'] * size / params['project_horizon_yrs'])
-        # exit()
-        # --- end of size, check if it's the best
+            status_text.text(f"Battery size: {size} MW — Day {d+1} of {n_days}")
 
-        annual_savings = total_cost_no_batt - total_cost_with_batt
+        # --- annualise the operating totals (convert sum of days -> EUR/year)
+        annual_cost_no_batt = total_operating_cost_no_batt * annual_multiplier
+        annual_operating_cost_with_batt = total_operating_cost_with_batt * annual_multiplier
+
+        # --- capex (total and annualised write-off)
+        capex_total = params['price_eur_per_mw'] * size                 # EUR (price per MW * MW)
+        writeoff_annual = capex_total / float(params['project_horizon_yrs'])  # EUR / year
+
+        # --- final annual cost including capex write-off
+        annual_cost_with_batt_incl_capex = annual_operating_cost_with_batt + writeoff_annual
+
+        # --- savings (EUR / year)
+        annual_savings = annual_cost_no_batt - annual_cost_with_batt_incl_capex
+
+        # keep best size by annual savings
         if annual_savings > best_savings:
             best_savings = annual_savings
             best_size = size
             detailed_results = copy.deepcopy(daily_results_temp)
 
-
-        # store summary
+        # record summary for this size (all annualised except capex_total which is total upfront)
         summary_records.append({
             "size_mw": size,
-            "annual_cost_no_batt": total_cost_no_batt,
-            "annual_cost_with_batt": total_cost_with_batt,
-            "annual_savings": annual_savings
+            "annual_cost_no_batt": annual_cost_no_batt,
+            "annual_operating_cost_with_batt": annual_operating_cost_with_batt,
+            "annual_cost_with_batt_incl_capex": annual_cost_with_batt_incl_capex,
+            "annual_savings": annual_savings,
+            "capex_total_eur": capex_total,
+            "writeoff_annual_eur": writeoff_annual
         })
 
-    status_text.text(f"✅ Optimisation complete — Best size: {best_size} mw")
+    status_text.text(f"✅ Optimisation complete — Best size: {best_size} MW")
     progress.empty()
 
     summary_df = pd.DataFrame(summary_records)
     daily_df = pd.DataFrame(daily_records)
     return summary_df, daily_df, detailed_results, best_size
-
 
 def plot_results(T, dt, load_profile, pv_profile, results):
     ts = np.arange(T) * dt
@@ -312,12 +336,42 @@ def plot_results(T, dt, load_profile, pv_profile, results):
     ax[2].legend(); ax[2].set_ylabel('mw / mwh'); ax[2].set_xlabel('Hour')
     return fig
 
+def summarise_generation_settings():
+    """
+    Return a one-line human-readable summary of the synthetic data generation settings
+    that were used (reads from st.session_state['generation_settings']).
+    If no generated settings are present (i.e. user uploaded a file), returns 'uploaded file'.
+    """
+    g = st.session_state.get('generation_settings')
+    if not g:
+        return "uploaded file"
+
+    # format numbers nicely
+    def fmt(x, nd=2):
+        if isinstance(x, float):
+            return f"{x:.{nd}f}"
+        return str(x)
+
+    parts = [
+        f"Base load {fmt(g['base_load_mw'])} MW",
+        f"Day peak {fmt(g['daytime_peak_mw'])} MW",
+        f"Evening peak {fmt(g['evening_peak_mw'])} MW",
+        f"PV max {fmt(g['pv_max_mw'])} MW",
+        f"Avg price {fmt(g['avg_price_eur_mwh'])} €/MWh",
+        f"Feedin discount {fmt(g['feedin_discount_eur_mwh'])} €/MWh",
+        f"Duck {fmt(g['duck_strength'], nd=2)}",
+        f"Grid fee {fmt(g['grid_fee_eur_mwh'])} €/MWh",
+        f"PTUs {g['ptu_count']} (dt={fmt(g['ptu_duration_hr'], nd=3)} h)"
+    ]
+    return "; ".join(parts)
+
 # -----------------------
 # Streamlit app
 # -----------------------
 
-st.set_page_config(layout="wide", page_title="BESS optimisation prototype")
-st.title("Behind-the-meter BESS — prototype")
+st.set_page_config(layout="wide", page_title="BTM BESS optimiser and business case")
+st.title("BTM BESS optimiser and business case")
+st.write("Otto Fabius - Sympower - September 2025")
 
 params = get_user_inputs()
 T = int(params['ptu_count'])
@@ -360,8 +414,22 @@ with st.expander("1. Input data", expanded=True):
             pv_max_mw = st.number_input("PV max power (mw)", value=2.)
             feedin_discount = st.number_input("Difference between load price and feedin price (€/mwh)", value=10)
         with col4:
-            avg_price = st.number_input("DA average price (€/mwh)", value=60)
-            duck_strength = st.number_input("Duck curve strength (0=no duck, 1 often when prices start to get negative)", min_value=0.0, max_value=2.0, value=1.2, step=0.1)
+            avg_price = st.number_input("DA average price (€/mwh)", value=80)
+            duck_strength = st.number_input("Duck curve strength (0=no duck, 1 often when prices start to get negative)", min_value=0.0, max_value=2.0, value=0.8, step=0.1)
+        
+        # Save the generation settings so we can include them in exports later
+        st.session_state['generation_settings'] = {
+            "base_load_mw": float(base_load),
+            "grid_fee_eur_mwh": float(grid_energy_fee),
+            "daytime_peak_mw": float(daytime_peak),
+            "evening_peak_mw": float(evening_peak),
+            "pv_max_mw": float(pv_max_mw),
+            "feedin_discount_eur_mwh": float(feedin_discount),
+            "avg_price_eur_mwh": float(avg_price),
+            "duck_strength": float(duck_strength),
+            "ptu_count": int(T),
+            "ptu_duration_hr": float(dt)
+        }
 
 
         load_year, pv_year, price_year, feedin_year = generate_full_year_profiles(
@@ -382,21 +450,24 @@ with st.expander("1. Input data", expanded=True):
         st.subheader("Preview: first day")
         col1, col2 = st.columns(2)
         with col1:
-
-            fig, ax = plt.subplots(figsize=(10,3))
-            ax.plot(first_day['load'].values, label='Load')
-            ax.plot(first_day['pv'].values, label='PV')
-            ax.legend()
-            st.pyplot(fig)
+            ts = np.arange(T) * params['dt']
+            fig_profile, ax_profile = plt.subplots(figsize=(10,3))
+            ax_profile.plot(ts, first_day['load'].values, label='Load')
+            ax_profile.plot(ts, first_day['pv'].values, label='PV')
+            ax_profile.set_xlabel("Hour of day"); ax_profile.set_ylabel("Power (mw)")
+            ax_profile.set_title("Load and PV profiles"); ax_profile.grid(True)
+            ax_profile.legend()
+            st.pyplot(fig_profile)
 
         # --- Day-ahead price plot ---
         with col2:
             ts = np.arange(T) * params['dt']
-
-            fig_price, ax_price = plt.subplots(figsize=(12, 3))
+            fig_price, ax_price = plt.subplots(figsize=(10, 3))
             ax_price.plot(ts, first_day['use_price'], label='DA Price', color='tab:orange')
             ax_price.set_xlabel("Hour of day"); ax_price.set_ylabel("Price (€/mwh)")
-            ax_price.set_title("Day-ahead energy price"); ax_price.grid(True); ax_price.legend()
+            ax_price.set_title("Energy prices"); ax_price.grid(True); ax_price.legend()
+            # add feedin price
+            ax_price.plot(ts, first_day['inject_price'], label='Feed-in Price')
             st.pyplot(fig_price)
 
 
@@ -437,7 +508,20 @@ with st.expander("Optimisation", expanded=True):
     optimisation_complete = 1
     st.session_state['optimisation_complete'] = 0
 
-    if st.button("Run Optimisation"):
+
+    # Add a horizontal line
+    st.markdown("---")
+
+    # Add some spacing
+    st.write("\n")
+
+    st.markdown("""
+        <div style="font-size:24px; font-weight:bold; text-align:left;">
+        🚀 Run Optimisation 🚀
+        </div>
+        """, unsafe_allow_html=True)
+    if st.button("(re-)Run Optimisation"):
+
         # --- Prepare DF for optimisation ---
         # if df is not None:
         load_arr = df['load'].values[:T]
@@ -462,7 +546,6 @@ with st.expander("Optimisation", expanded=True):
             })
         else:
             df_run = df
-
         # --- Run yearly optimisation (1 day or full year) ---
         summary_df, daily_df, detailed_results, best_size = run_yearly_optimisation(battery_sizes, df_run, params)
 
@@ -474,139 +557,271 @@ with st.expander("Optimisation", expanded=True):
         # st.session_state['optimisation_complete'] = 1
         optimisation_complete = 1
 
-if optimisation_complete==1:
-    with st.expander("Results exploration", expanded=True):
-        with st.expander("Battery size sweep results (click to show)", expanded=False):
-            if len(battery_sizes) > 2:
-                fig, ax = plt.subplots(figsize=(10,4))
-                ax.plot(summary_df['size_mw'], summary_df['annual_cost_no_batt']/1000, label='No battery', marker='o')
-                ax.plot(summary_df['size_mw'], summary_df['annual_cost_with_batt']/1000, label='With battery', marker='o')
-                ax.set_xlabel("Battery size (mw)"); ax.set_ylabel("Total cost (k€)")
-                ax.set_title("Total cost vs battery size"); ax.grid(True); ax.legend()
+
+        with st.expander("Results exploration", expanded=True):
+            with st.expander("Battery size sweep results (click to show)", expanded=False):
+                if len(battery_sizes) > 2:
+                    fig, ax = plt.subplots(figsize=(10,4))
+                    ax.plot(summary_df['size_mw'], summary_df['annual_cost_no_batt']/1000, label='No battery', marker='o')
+                    ax.plot(summary_df['size_mw'], summary_df['annual_cost_with_batt_incl_capex']/1000, label='With battery', marker='o')
+                    ax.set_xlabel("Battery size (mw)"); ax.set_ylabel("Total cost (k€)")
+                    ax.set_title("Total cost vs battery size"); ax.grid(True); ax.legend()
+                    st.pyplot(fig)
+                else:
+                    st.dataframe(summary_df)
+                    st.markdown(f"**Best battery size:** {best_size} mw → savings: {summary_df['annual_savings'].max()/1000:.2f} k€")
+            # --- Select day to display ---
+            # day_to_show = st.number_input("Select day to display", 1)
+            day_to_show = 1
+            daily_display = daily_df[(daily_df['day'] == day_to_show) & 
+                                (daily_df['size_mw'].round(2) == round(best_size, 2))].iloc[0]
+
+            # --- Show summary metrics ---
+            st.subheader("Summary results")
+            annual_cost_without_batt = summary_df['annual_cost_no_batt'].max()
+            annual_savings_best = summary_df['annual_savings'].max()
+            # annual_cost_incl_writeoff = summary_df['annual_cost_with_batt'].min()
+            # annual_cost_excl_writeoff = annual_cost_incl_writeoff + (params['price_eur_per_mw'] * best_size) / params['project_horizon_yrs']
+            # annual_savings_excl_writeoff = annual_cost_without_batt - annual_cost_excl_writeoff
+            # Use the correct column name that includes capex
+            annual_cost_incl_writeoff = summary_df['annual_cost_with_batt_incl_capex'].min()
+
+            # Remove the annual write-off to get cost excluding capex
+            annual_cost_excl_writeoff = annual_cost_incl_writeoff - (params['price_eur_per_mw'] * best_size) / params['project_horizon_yrs']
+
+            # Savings excluding write-off (capex)
+            annual_savings_excl_writeoff = annual_cost_without_batt - annual_cost_excl_writeoff
+            # 10% of net savings (excl write-off)
+            annual_revenues_10pct = 0.10 * annual_savings_excl_writeoff
+
+            # Peak import
+            peak_import_annual = daily_df[daily_df['size_mw'].round(2) == round(best_size,2)]['peak_import_with_batt'].max()
+
+
+            col1, col2, col3, col4 = st.columns(4)
+
+            col1.metric("Yearly cost without battery use (k€)", f"{annual_cost_without_batt/1000:.2f}")
+            col1.metric("Capital cost (k€)", f"{params['price_eur_per_mw'] * best_size/1000:.2f}")
+
+            col2.metric("Cost incl write-off (k€)", f"{annual_cost_excl_writeoff/1000:.2f}")
+            col2.metric("Write-off cost (k€)", f"{(params['price_eur_per_mw']/1000 * best_size) / params['project_horizon_yrs']:.2f}")
+            
+            col3.metric("Years until payback", f"{params['price_eur_per_mw'] * best_size / annual_savings_best:.1f} yrs" 
+                        if annual_savings_best > 0 else "N/A")
+            col3.metric("Peak import (mw):", f" {daily_display['peak_import_with_batt']:.2f}")
+
+            col4.metric("Net savings excl write-off (k€)", f"{(annual_cost_without_batt-annual_cost_incl_writeoff)/1000:.2f}")
+            col4.metric("Annual revenue if 10% of net savings (k€)", f"{annual_revenues_10pct/1000:.2f}")
+
+            with st.expander("Inspect detailed results (click to show)", expanded=False):
+
+                # --- Plot results for selected day ---
+
+                results_day = detailed_results[day_to_show]
+                ts = np.arange(T) * params['dt']
+                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+
+                # Define colors for each line (max contrast, avoid light yellow)
+                colors = {
+                    'Load (MW)': 'tab:blue',
+                    'PV (MW)': 'tab:green',
+                    'Net before battery': 'tab:orange',
+                    'Battery power (+charging, -discharging)': 'tab:red',
+                    'Import': 'tab:purple',
+                    'Export': 'tab:brown',
+                    'SoC (MWh)': 'black'
+                }
+
+                # --- First subplot: battery power, SoC, net before battery ---
+                ax1.plot(ts, df_run['load'].values[:T] - df_run['pv'].values[:T],
+                        label='Net before battery', color=colors['Net before battery'])
+                ax1.plot(ts, results_day['P'],
+                        label='Battery power (+charging, -discharging)', color=colors['Battery power (+charging, -discharging)'])
+                ax1.plot(ts, results_day['SoC'],
+                        label='SoC (MWh)', color=colors['SoC (MWh)'])
+                ax1.plot(ts, df_run['use_price'].values[:T]/100, label='Price (100€/MWh)', color='tab:gray')
+
+
+                ax1.set_ylabel('MW / MWh')
+                ax1.set_title(f"Day {day_to_show} profiles (Battery size: {best_size} MW)")
+                ax1.legend(loc='upper center', bbox_to_anchor=(0.5, 1.15), ncol=3)
+                ax1.grid(True)
+
+                # --- Second subplot: load, PV, battery power, import/export ---
+                ax2.plot(ts, df_run['load'].values[:T],
+                        label='Load (MW)', color=colors['Load (MW)'])
+                ax2.plot(ts, df_run['pv'].values[:T],
+                        label='PV (MW)', color=colors['PV (MW)'])
+                ax2.plot(ts, results_day['P'],
+                        label='Battery power (+charging, -discharging)', color=colors['Battery power (+charging, -discharging)'])
+                ax2.plot(ts, results_day['Import'],
+                        label='Import', color=colors['Import'])
+                ax2.plot(ts, results_day['Export'],
+                        label='Export', color=colors['Export'])
+
+                # Add vertical dotted lines at every whole hour
+                for hour in range(int(ts[-1]) + 1):
+                    ax1.axvline(x=hour, color='gray', linestyle=':', linewidth=0.8)
+                    ax2.axvline(x=hour, color='gray', linestyle=':', linewidth=0.8)
+
+                ax2.set_xlabel('Hour')
+                ax2.set_ylabel('MW')
+                ax2.legend(loc='upper center', bbox_to_anchor=(0.5, 1.15), ncol=3)
+                ax2.grid(True)
+
                 st.pyplot(fig)
+
+                # --- Compute idle hours per day by SOC <50% and >=50% ---
+                idle_low50_per_day = []
+                idle_high50_per_day = []
+                max_power = best_size  # MW
+
+                for day_results in detailed_results.values():
+                    P = np.array(day_results['P'])
+                    SoC = np.array(day_results['SoC'])
+                    idle_mask = np.abs(P) < 0.1 * max_power
+                    soc_pct = SoC / (best_size * params['duration_hrs']) * 100
+
+                    idle_low50_per_day.append(np.sum(idle_mask & (soc_pct < 50)) * params['dt'])
+                    idle_high50_per_day.append(np.sum(idle_mask & (soc_pct >= 50)) * params['dt'])
+
+                days = list(detailed_results.keys())
+
+                # --- Plot ---
+                fig_idle, ax_idle = plt.subplots(figsize=(12,4))
+                ax_idle.bar(days, idle_low50_per_day, color='tab:orange', label='SOC < 50%')
+                ax_idle.bar(days, idle_high50_per_day, bottom=idle_low50_per_day, color='tab:blue', label='SOC ≥ 50%')
+                ax_idle.set_xlabel("Day of year")
+                ax_idle.set_ylabel("Idle hours per day")
+                ax_idle.set_title(f"Daily idle hours for best battery size ({best_size} MW)")
+                ax_idle.legend()
+                ax_idle.grid(True, linestyle='--', alpha=0.5)
+
+                st.pyplot(fig_idle)
+
+                # --- Show results table ---
+                results_df = pd.DataFrame({
+                    't': np.arange(T),
+                    'load_mw': df_run['load'].values[:T],
+                    'pv_mw': df_run['pv'].values[:T],
+                    'P_batt_mw': results_day['P'],
+                    'Import_mw': results_day['Import'],
+                    'Export_mw': results_day['Export'],
+                    'SoC_mwh': results_day['SoC'],
+                    'price_eur_mwh': df_run['use_price'].values[:T],
+                    'feedin_eur_mwh': df_run['inject_price'].values[:T],
+                })
+                st.subheader("Results table (first 50 rows)")
+                st.dataframe(results_df.head(50))
+
+
+            # --- CET timestamp for filename ---
+            cet = pytz.timezone('CET')
+            dt_str = datetime.now(cet).strftime("%Y%m%d_%H%M%S")
+
+            # --- Convert parameters to JSON string ---
+            params_json = json.dumps(params)
+
+            # --- Create CSV with parameters as first row ---
+            output = io.StringIO()
+            output.write(f"# Simulation parameters: {params_json}\n")
+            results_df.to_csv(output, index=False)
+            csv_data = output.getvalue().encode('utf-8')
+
+            # --- 1. Experiment summary CSV ---
+            best_summary_row = summary_df[summary_df['size_mw'] == best_size].iloc[0]
+
+            # --- Compute ROI and profit ---
+            roi_years = best_summary_row['capex_total_eur'] / best_summary_row['annual_savings'] if best_summary_row['annual_savings'] > 0 else np.nan
+            profit_per_year = best_summary_row['annual_savings']
+
+            # --- Compute average idle hours ---
+            idle_total_per_day = []
+            idle_low_per_day = []
+            idle_high_per_day = []
+
+            for day_results in detailed_results.values():
+                P = np.array(day_results['P'])
+                SoC = np.array(day_results['SoC'])
+                idle_mask = np.abs(P) < 0.1 * max_power  # idle if abs(power) < 10% max power
+                soc_pct = SoC / (best_size * params['duration_hrs']) * 100  # % of capacity
+
+                idle_total_per_day.append(np.sum(idle_mask) * params['dt'])
+                idle_low_per_day.append(np.sum(idle_mask & (soc_pct < 30)) * params['dt'])
+                idle_high_per_day.append(np.sum(idle_mask & (soc_pct > 70)) * params['dt'])
+
+            avg_idle_total = np.mean(idle_total_per_day)
+            avg_idle_low = np.mean(idle_low_per_day)
+            avg_idle_high = np.mean(idle_high_per_day)
+
+            # --- Create experiment summary DataFrame ---
+            # --- Build user-friendly single-row experiment summary (human-readable headers, no underscores) ---
+            # Pick summary row for the best size (robust match)
+            best_row_mask = summary_df['size_mw'].round(3) == round(best_size, 3)
+            if best_row_mask.any():
+                best_row = summary_df[best_row_mask].iloc[0]
             else:
-                st.dataframe(summary_df)
-                st.markdown(f"**Best battery size:** {best_size} mw → savings: {summary_df['annual_savings'].max()/1000:.2f} k€")
-        # --- Select day to display ---
-        # day_to_show = st.number_input("Select day to display", 1)
-        day_to_show = 1
-        daily_display = daily_df[(daily_df['day'] == day_to_show) & 
-                            (daily_df['size_mw'].round(2) == round(best_size, 2))].iloc[0]
+                # fallback to first row (should not normally happen)
+                best_row = summary_df.iloc[0]
 
-        # --- Show summary metrics ---
-        st.subheader("Summary results")
-        annual_cost_without_batt = summary_df['annual_cost_no_batt'].max()
-        annual_savings_best = summary_df['annual_savings'].max()
-        annual_cost_incl_writeoff = summary_df['annual_cost_with_batt'].min()
-        annual_cost_excl_writeoff = annual_cost_incl_writeoff + (params['price_eur_per_mw'] * best_size) / params['project_horizon_yrs']
-        annual_savings_excl_writeoff = annual_cost_without_batt - annual_cost_excl_writeoff
+            # Extract annual numbers (these are the same names used in your summary_records)
+            cost_no_bess = float(best_row['annual_cost_no_batt'])
+            op_cost_with_bess = float(best_row['annual_operating_cost_with_batt'])
+            total_cost_with_bess = float(best_row['annual_cost_with_batt_incl_capex'])
+            savings_incl_capex = float(best_row['annual_savings'])
+            capex_total = float(best_row['capex_total_eur'])
+            capex_annual = float(best_row['writeoff_annual_eur'])
 
-        col1, col2, col3, col4 = st.columns(4)
+            # Compute savings excluding capex and derived metrics
+            savings_excl_capex = cost_no_bess - op_cost_with_bess
+            if savings_excl_capex > 0:
+                payback_years = capex_total / savings_excl_capex
+            else:
+                payback_years = "N/A"
 
-        col1.metric("Total cost without battery use (k€)", f"{annual_cost_without_batt/1000:.2f}")
-        col1.metric("Capital cost (k€)", f"{params['price_eur_per_mw'] * best_size/1000:.2f}")
+            rev_10pct = 0.10 * savings_excl_capex
 
-        col2.metric("Cost incl battery write-off (k€)", f"{annual_cost_excl_writeoff/1000:.2f}")
-        col2.metric("Write-off cost (k€)", f"{(params['price_eur_per_mw']/1000 * best_size) / params['project_horizon_yrs']:.2f}")
-        
-        col3.metric("Net savings excl write-off (k€)", f"{(annual_cost_without_batt-annual_cost_incl_writeoff)/1000:.2f}")
-        col3.metric("Years until payback", f"{params['price_eur_per_mw'] * best_size / annual_savings_best:.1f} yrs" 
-                    if annual_savings_best > 0 and run_type=="Full year" else "N/A")
- 
+            # Peak import for best size (take max observed daily peak across the sample for the best size)
+            best_daily_for_size = daily_df[daily_df['size_mw'].round(3) == round(best_size, 3)]
+            if not best_daily_for_size.empty and 'peak_import_with_batt' in best_daily_for_size.columns:
+                peak_import_val = float(best_daily_for_size['peak_import_with_batt'].max())
+            else:
+                peak_import_val = None  # or 0.0 if you prefer
 
-        st.write(f"Peak import (mw): {daily_display['peak_import_with_batt']:.2f}")
+            # Build export DataFrame with friendly headers (single row)
+            exp_summary_df = pd.DataFrame([{
+                "Input data filename (or generated)": uploaded.name if uploaded else "generated",
+                "Data generation settings": summarise_generation_settings(),
+                "Best size (MW)": best_size,
+                "Cost without BESS (EUR/yr)": cost_no_bess,
+                "Operating cost with BESS (EUR/yr)": op_cost_with_bess,
+                "Total cost with BESS (EUR/yr)": total_cost_with_bess,
+                "Savings incl capex (EUR/yr)": savings_incl_capex,
+                "Savings excl capex (EUR/yr)": savings_excl_capex,
+                "CapEx total (EUR)": capex_total,
+                "CapEx annual (EUR/yr)": capex_annual,
+                "Payback (yrs)": payback_years,
+                "Peak import (MW)": peak_import_val,
+                "10% revenue (EUR/yr)": rev_10pct
+            }])
 
-        with st.expander("Inspect detailed results (click to show)", expanded=False):
-
-            # --- Plot results for selected day ---
-
-            results_day = detailed_results[day_to_show]
-            ts = np.arange(T) * params['dt']
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-
-            # Define colors for each line (max contrast, avoid light yellow)
-            colors = {
-                'Load (MW)': 'tab:blue',
-                'PV (MW)': 'tab:green',
-                'Net before battery': 'tab:orange',
-                'Battery power (+charging, -discharging)': 'tab:red',
-                'Import': 'tab:purple',
-                'Export': 'tab:brown',
-                'SoC (MWh)': 'black'
-            }
-
-            # --- First subplot: battery power, SoC, net before battery ---
-            ax1.plot(ts, df_run['load'].values[:T] - df_run['pv'].values[:T],
-                    label='Net before battery', color=colors['Net before battery'])
-            ax1.plot(ts, results_day['P'],
-                    label='Battery power (+charging, -discharging)', color=colors['Battery power (+charging, -discharging)'])
-            ax1.plot(ts, results_day['SoC'],
-                    label='SoC (MWh)', color=colors['SoC (MWh)'])
-            ax1.plot(ts, df_run['use_price'].values[:T]/100, label='Price (100€/MWh)', color='tab:gray')
+            # --- Download button for the human-readable single-row experiment summary ---
+            exp_csv = exp_summary_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download experiment summary (CSV)",
+                exp_csv,
+                f"experiment_summary_{dt_str}.csv",
+                "text/csv"
+            )
 
 
-            ax1.set_ylabel('MW / MWh')
-            ax1.set_title(f"Day {day_to_show} profiles (Battery size: {best_size} MW)")
-            ax1.legend(loc='upper center', bbox_to_anchor=(0.5, 1.15), ncol=3)
-            ax1.grid(True)
+            # --- 2. Daily summary CSV ---
+            best_daily_df = daily_df[daily_df['size_mw'].round(2) == round(best_size, 2)]
+            daily_csv = best_daily_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download daily results ( CSV)",
+                daily_csv,
+                f"daily_summary_best_size_{dt_str}.csv",
+                "text/csv"
+            )
 
-            # --- Second subplot: load, PV, battery power, import/export ---
-            ax2.plot(ts, df_run['load'].values[:T],
-                    label='Load (MW)', color=colors['Load (MW)'])
-            ax2.plot(ts, df_run['pv'].values[:T],
-                    label='PV (MW)', color=colors['PV (MW)'])
-            ax2.plot(ts, results_day['P'],
-                    label='Battery power (+charging, -discharging)', color=colors['Battery power (+charging, -discharging)'])
-            ax2.plot(ts, results_day['Import'],
-                    label='Import', color=colors['Import'])
-            ax2.plot(ts, results_day['Export'],
-                    label='Export', color=colors['Export'])
-
-            # Add vertical dotted lines at every whole hour
-            for hour in range(int(ts[-1]) + 1):
-                ax1.axvline(x=hour, color='gray', linestyle=':', linewidth=0.8)
-                ax2.axvline(x=hour, color='gray', linestyle=':', linewidth=0.8)
-
-            ax2.set_xlabel('Hour')
-            ax2.set_ylabel('MW')
-            ax2.legend(loc='upper center', bbox_to_anchor=(0.5, 1.15), ncol=3)
-            ax2.grid(True)
-
-            st.pyplot(fig)
-
-            # --- Show results table ---
-            results_df = pd.DataFrame({
-                't': np.arange(T),
-                'load_mw': df_run['load'].values[:T],
-                'pv_mw': df_run['pv'].values[:T],
-                'P_batt_mw': results_day['P'],
-                'Import_mw': results_day['Import'],
-                'Export_mw': results_day['Export'],
-                'SoC_mwh': results_day['SoC'],
-                'price_eur_mwh': df_run['use_price'].values[:T],
-                'feedin_eur_mwh': df_run['inject_price'].values[:T],
-            })
-            st.subheader("Results table (first 50 rows)")
-            st.dataframe(results_df.head(50))
-
-
-        # --- CET timestamp for filename ---
-        cet = pytz.timezone('CET')
-        dt_str = datetime.now(cet).strftime("%Y%m%d_%H%M%S")
-
-        # --- Convert parameters to JSON string ---
-        params_json = json.dumps(params)
-
-        # --- Create CSV with parameters as first row ---
-        output = io.StringIO()
-        output.write(f"# Simulation parameters: {params_json}\n")
-        results_df.to_csv(output, index=False)
-        csv_data = output.getvalue().encode('utf-8')
-
-        # --- Download button ---
-        st.download_button(
-            label="Download results + parameters",
-            data=csv_data,
-            file_name=f"bess_day_results_{dt_str}.csv",
-            mime="text/csv"
-        )
