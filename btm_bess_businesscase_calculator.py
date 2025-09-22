@@ -385,9 +385,6 @@ dt = params['dt']
 # --- Unified data input (upload or generate) ---
 with st.expander("1. Input data", expanded=True):
 
-    if 'df' not in st.session_state:
-        st.session_state['df'] = None
-
     uploaded = st.file_uploader(
         "Upload yearly CSV (expected 365 × PTUs rows). Required columns: load, pv, use_price, inject_price, grid_fee",
         type=["csv"]
@@ -423,7 +420,7 @@ with st.expander("1. Input data", expanded=True):
                 "duck_strength": 0.3,
                 "grid_fee_eur_mwh": 8
             },
-            "Flat load, high PV": {
+            "Flat load": {
                 "base_load_mw": 1.,
                 "daytime_peak_mw": 1.,
                 "evening_peak_mw": 1.,
@@ -438,26 +435,26 @@ with st.expander("1. Input data", expanded=True):
         scenario_texts = {
             "Profitable arbitrage": "Profitable arbitrage settings have a year round duck curve and a decently high price volatility. Any case like this, where profits from arbitrage outweigh write-offs, will result in the largest battery size being the most profitable.",
             "Load matches PV": "Load matches pv settings show that BTM BESS is worse when the load profile is not very different the pv production. Day-ahead prices have a mild duck curve shape. This scenario should yield limited battery arbitrage opportunity and doesnt have a profitable business case",
-            "Flat load, high PV": "In this scenario there is a lot of overproduction of PV and a significant grid fee. Day-ahead alone are not volatile enough to provide a good business case. In cases like these, there will be an optimal battery size that will maximise self consumption. With these settings, the optimum is around 0.3 MW for standard capex of 700k and battery depth of 2 hrs.",
+            "Flat load": "In this scenario Day-ahead alone are not volatile enough to provide a good business case, bujt there is a significant grid fee per MWh. Set PV_multiplier to 1. In cases like these, there will be an optimal battery size that will maximise self consumption.  With these settings, the optimum is around 1.0 MW for standard capex of 700k, battery depth of 2 hrs, and pv multiplier of 0.5.",
             "Custom": "Adjust the parameters below to create your own scenario."
         }
 
         col1, col2, col3, col4 = st.columns(4)
 
         with col1:
-            if st.button("Profitable arbitrage"):
-                st.session_state.update(scenario_params["Profitable arbitrage"])
-                st.session_state['scenario'] = "Profitable arbitrage"
-
-        with col2:
             if st.button("Load matches PV"):
                 st.session_state.update(scenario_params["Load matches PV"])
                 st.session_state['scenario'] = "Load matches PV"
 
+        with col2:
+            if st.button("Flat load"):
+                st.session_state.update(scenario_params["Flat load"])
+                st.session_state['scenario'] = "Flat load"
+
         with col3:
-            if st.button("Flat load, high PV"):
-                st.session_state.update(scenario_params["Flat load, high PV"])
-                st.session_state['scenario'] = "Flat load, high PV"
+            if st.button("Profitable arbitrage"):
+                st.session_state.update(scenario_params["Profitable arbitrage"])
+                st.session_state['scenario'] = "Profitable arbitrage"
 
         with col4:
             if st.button("Custom"):
@@ -491,7 +488,7 @@ with st.expander("1. Input data", expanded=True):
         load_year, pv_year, price_year, feedin_year = generate_full_year_profiles(
             T, pv_max_mw, base_load, daytime_peak, evening_peak, avg_price, feedin_discount, duck_strength
         )
-        st.session_state['df'] = pd.DataFrame({
+        df = pd.DataFrame({
             'load': load_year,
             'pv': pv_year,
             'use_price': price_year,
@@ -516,18 +513,21 @@ with st.expander("1. Input data", expanded=True):
     else:
         try:
             df = pd.read_csv(uploaded)
-            st.session_state['df'] = df
             st.success("CSV loaded.")
-            pv_multiplier = st.number_input("PV Multiplier", value=1.0, step=0.1)  # Multiply magnitude of PV generation by this factor
-            df['pv'] *= pv_multiplier
             st.write(f"PV profile scaled by factor {pv_multiplier:.2f}.")
         except Exception as e:
             st.error(f"Error reading CSV: {e}")
 
+    # normalise load
+    df['load'] = df['load']/np.mean(np.abs(df['load']))
+    
+    # normalise pv and multiply by input factor
+    pv_multiplier = st.number_input("PV Multiplier: average production divided by consumption", value=0.5, step=0.1)  # Multiply magnitude of PV generation by this factor
+    df['pv'] = df['pv']/np.mean(np.abs(df['pv']))
+    df['pv'] *= pv_multiplier
 
 
     # --- Preview first day ---
-    df = st.session_state.get('df', None)
     if df is not None:
         first_day = df.iloc[:T]
         st.subheader("Preview: first day")
@@ -574,7 +574,7 @@ with st.expander("Optimisation", expanded=True):
     with col_b:
         max_size = st.number_input("Max size (mw)", value=1., step=0.1, min_value=0.)
     with col_c:
-        n_steps = st.number_input("Steps", value=1, step=1, min_value=1, max_value=20)
+        n_steps = st.number_input("Steps", value=1, step=1, min_value=1, max_value=100)
 
 
     battery_sizes = []
