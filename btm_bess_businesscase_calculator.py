@@ -408,7 +408,7 @@ with st.expander("1. Input data", expanded=True):
                 "duck_strength": 0.7, # obsolete
                 "grid_fee_eur_mwh": 5
             },
-            "Load matches PV": {
+            "Unviable (Load matches PV)": {
                 "base_load_mw": 2.0,
                 "daytime_peak_mw": 4.0,
                 "evening_peak_mw": 2.0,
@@ -418,7 +418,7 @@ with st.expander("1. Input data", expanded=True):
                 "duck_strength": 0.3, # obsolete
                 "grid_fee_eur_mwh": 8
             },
-            "Flat load": {
+            "Viable for optimal BESS size": {
                 "base_load_mw": 1.,
                 "daytime_peak_mw": 1.,
                 "evening_peak_mw": 1.,
@@ -432,22 +432,22 @@ with st.expander("1. Input data", expanded=True):
 
         scenario_texts = {
             "Profitable arbitrage": "Profitable arbitrage settings have a year round duck curve and a decently high price volatility. Any case like this, where profits from arbitrage outweigh write-offs, will result in the largest battery size being the most profitable.",
-            "Load matches PV": "Load matches pv settings show that BTM BESS is worse when the load profile is not very different the pv production. Day-ahead prices have a mild duck curve shape. This scenario should yield limited battery arbitrage opportunity and doesnt have a profitable business case",
-            "Flat load": "In this scenario Day-ahead alone are not volatile enough to provide a good business case, bujt there is a significant grid fee per MWh. Set PV_multiplier to 1. In cases like these, there will be an optimal battery size that will maximise self consumption.  With these settings, the optimum is around 1.0 MW for standard capex of 700k, battery depth of 2 hrs, and pv multiplier of 0.5.",
+            "Unviable (Load matches PV)": "Load matches pv settings show that BTM BESS is worse when the load profile is not very different the pv production. When the price variances below are set to 10 (a mild duck-curve), this scenario doesnt have a profitable business case",
+            "Viable for optimal BESS size": "Set PV_multiplier to 1, and the price variances to 25 each, in the next section. In this scenario day-ahead spreads alone are not volatile enough to provide a good business case, but there is a significant grid fee per MWh.  In cases like these, there will be an optimal battery size that will maximise self consumption. With these settings, the optimum is around 1.1 MW for standard capex of 700k & battery depth of 2 hrs,",
             "Custom": "Adjust the parameters below to create your own scenario."
         }
 
         col1, col2, col3, col4 = st.columns(4)
 
         with col1:
-            if st.button("Load matches PV"):
-                st.session_state.update(scenario_params["Load matches PV"])
-                st.session_state['scenario'] = "Load matches PV"
+            if st.button("Unviable (Load matches PV)"):
+                st.session_state.update(scenario_params["Unviable (Load matches PV)"])
+                st.session_state['scenario'] = "Unviable (Load matches PV)"
 
         with col2:
-            if st.button("Flat load"):
-                st.session_state.update(scenario_params["Flat load"])
-                st.session_state['scenario'] = "Flat load"
+            if st.button("Viable for optimal BESS size"):
+                st.session_state.update(scenario_params["Viable for optimal BESS size"])
+                st.session_state['scenario'] = "Viable for optimal BESS size"
 
         with col3:
             if st.button("Profitable arbitrage"):
