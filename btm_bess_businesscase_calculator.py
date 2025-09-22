@@ -754,7 +754,7 @@ if summary_df is not None and best_size is not None:
 
         ax1.set_ylabel('MW / MWh')
         ax1.set_title(f"Day {day_to_show} profiles (Battery size: {best_size} MW)")
-        ax1.legend(loc='upper center', bbox_to_anchor=(0.5, 1.15), ncol=3)
+        ax1.legend(loc='lower center', bbox_to_anchor=(0.5, 1.15), ncol=3)
         ax1.grid(True)
 
         # --- Second subplot: load, PV, battery power, import/export ---
@@ -803,26 +803,22 @@ if summary_df is not None and best_size is not None:
         ax_idle.bar(days, idle_high50_per_day, bottom=idle_low50_per_day, color='tab:blue', label='SOC ≥ 50%')
         ax_idle.set_xlabel("Day of year")
         ax_idle.set_ylabel("Idle hours per day")
-        ax_idle.set_title(f"Daily idle (<10%) hours for best battery size ({best_size} MW)")
+        ax_idle.set_title(f"Daily idle (<10% of max power) hours for best battery size ({best_size} MW)")
         ax_idle.legend()
         ax_idle.grid(True, linestyle='--', alpha=0.5)
 
         st.pyplot(fig_idle)
+    
 
-        results_df = pd.DataFrame({
-            't': np.arange(T),
-            'load_mw': df_run['load'].values[:T],
-            'pv_mw': df_run['pv'].values[:T],
-            'P_batt_mw': results_day['P'],
-            'Import_mw': results_day['Import'],
-            'Export_mw': results_day['Export'],
-            'SoC_mwh': results_day['SoC'],
-            'price_eur_mwh': df_run['use_price'].values[:T],
-            'feedin_eur_mwh': df_run['inject_price'].values[:T],
-        })
-        # --- Show results table ---
-        # st.subheader("Results table (first 50 rows)")
-        # st.dataframe(results_df.head(50))
+    if run_type == "Full year":
+        # --- Daily summary Plot ---
+        best_daily_df = daily_df[daily_df['size_mw'].round(2) == round(best_size, 2)]
+        fig_daily, ax_daily = plt.subplots(figsize=(12,4))
+        ax_daily.set_xlabel("Day of year")
+        ax_daily.set_ylabel("Daily savings (eur)")
+        ax_daily.set_title(f"Savings per day for best battery size ({best_size} MW)")
+        ax_daily.plot(best_daily_df['savings'])
+        st.pyplot(fig_daily)
 
 
     # --- CET timestamp for filename ---
@@ -832,6 +828,18 @@ if summary_df is not None and best_size is not None:
     # --- Convert parameters to JSON string ---
     params_json = json.dumps(params)
 
+    results_df = pd.DataFrame({
+        't': np.arange(T),
+        'load_mw': df_run['load'].values[:T],
+        'pv_mw': df_run['pv'].values[:T],
+        'P_batt_mw': results_day['P'],
+        'Import_mw': results_day['Import'],
+        'Export_mw': results_day['Export'],
+        'SoC_mwh': results_day['SoC'],
+        'price_eur_mwh': df_run['use_price'].values[:T],
+        'feedin_eur_mwh': df_run['inject_price'].values[:T],
+    })
+    
     # --- Create CSV with parameters as first row ---
     output = io.StringIO()
     output.write(f"# Simulation parameters: {params_json}\n")
@@ -916,8 +924,7 @@ if summary_df is not None and best_size is not None:
 
     # --- Download button for the human-readable single-row experiment summary ---
     exp_csv = exp_summary_df.to_csv(index=False).encode("utf-8")
-    best_daily_df = daily_df[daily_df['size_mw'].round(2) == round(best_size, 2)]
-    daily_csv = best_daily_df.to_csv(index=False).encode("utf-8")
+
     st.download_button(
         "Download experiment summary (CSV)",
         exp_csv,
@@ -925,12 +932,4 @@ if summary_df is not None and best_size is not None:
         "text/csv"
     )
 
-
-    # --- 2. Daily summary CSV ---
-    st.download_button(
-        "Download daily results ( CSV)",
-        daily_csv,
-        f"daily_summary_best_size_{dt_str}.csv",
-        "text/csv"
-    )
 
