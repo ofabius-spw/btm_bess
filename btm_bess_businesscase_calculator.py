@@ -640,7 +640,7 @@ with st.expander("Optimisation", expanded=True):
         # with st.expander("Results exploration", expanded=True):
 if summary_df is not None:        
     with st.expander("Battery size sweep results (click to show)", expanded=False):
-        if len(battery_sizes) > 2:
+        if len(battery_sizes) > 1:
             # --- Cost plot ---
             fig, ax = plt.subplots(figsize=(10,4))
             ax.plot(summary_df['size_mw'], summary_df['annual_cost_no_batt']/1000,
@@ -659,9 +659,9 @@ if summary_df is not None:
         else:
             st.dataframe(summary_df)
             st.markdown(
-                f"**Best battery size:** {best_size} MW → "
-                f"savings excl. capex: {summary_df['savings_excl_capex'].max()/1000:.2f} k€, "
-                f"savings incl. capex: {summary_df['savings_incl_capex'].max()/1000:.2f} k€"
+                f"**Battery size:** {best_size} MW → "
+                f"savings excl. capex: {summary_df['annual_operating_cost_with_batt'].max()/1000:.2f} k€, "
+                f"savings incl. capex: {summary_df['annual_cost_with_batt_incl_capex'].max()/1000:.2f} k€"
             )
 
     # --- Select day to display ---
