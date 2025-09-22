@@ -55,10 +55,10 @@ def get_user_inputs():
 
 
 
-def generate_mock_profiles(T, pv_max_mw, base_load, daytime_peak, evening_peak, avg_price, feedin_discount, duck_strength):
+def generate_mock_profiles(T, base_load, daytime_peak, evening_peak, avg_price, feedin_discount):
     hours = (np.arange(T) / T) * 24.0
     mu, sigma = 13.0, 3.0
-    pv_profile = pv_max_mw * np.maximum(0, np.exp(-0.5 * ((hours - mu) / sigma) ** 2))
+    pv_profile = np.maximum(0, np.exp(-0.5 * ((hours - mu) / sigma) ** 2))
 
     load_profile = np.full(T, base_load)
     for i, h in enumerate(hours):
@@ -73,15 +73,14 @@ def generate_mock_profiles(T, pv_max_mw, base_load, daytime_peak, evening_peak, 
 
     # --- Duck curve price profile ---
     # Base = avg_price
-    # Midday dip (hours 10–16), controlled by duck_strength
+    # Midday dip (hours 10–16)
     # --- Duck curve price profile ---
     morning_peak = np.exp(-0.5 * ((hours - 8) / 1.5) ** 2)
     midday_dip   = -np.exp(-0.5 * ((hours - 13) / 2.0) ** 2)
     evening_peak = np.exp(-0.5 * ((hours - 19) / 1.5) ** 2)
 
-    duck_raw = morning_peak + midday_dip + evening_peak
-    duck_raw -= duck_raw.mean()          # zero-mean to preserve avg_price
-    duck_profile = duck_strength * duck_raw
+    duck_profile = morning_peak + midday_dip + evening_peak
+    duck_profile -= duck_profile.mean()          # zero-mean to preserve avg_price
 
     price_profile = avg_price * (1 + duck_profile)
 
@@ -89,10 +88,10 @@ def generate_mock_profiles(T, pv_max_mw, base_load, daytime_peak, evening_peak, 
 
     return load_profile, pv_profile, price_profile, feedin_profile
 
-def generate_full_year_profiles(T, pv_max_mw, base_load, daytime_peak, evening_peak, avg_price, feedin_discount, duck_strength):
+def generate_full_year_profiles(T,  base_load, daytime_peak, evening_peak, avg_price, feedin_discount):
     # single-day
     day_load, day_pv, day_price, day_feedin = generate_mock_profiles(
-        T, pv_max_mw, base_load, daytime_peak, evening_peak, avg_price, feedin_discount, duck_strength
+        T, base_load, daytime_peak, evening_peak, avg_price, feedin_discount
     )
 
     # tile for 365 days
@@ -356,10 +355,8 @@ def summarise_generation_settings():
         f"Base load {fmt(g['base_load_mw'])} MW",
         f"Day peak {fmt(g['daytime_peak_mw'])} MW",
         f"Evening peak {fmt(g['evening_peak_mw'])} MW",
-        f"PV max {fmt(g['pv_max_mw'])} MW",
         f"Avg price {fmt(g['avg_price_eur_mwh'])} €/MWh",
         f"Feedin discount {fmt(g['feedin_discount_eur_mwh'])} €/MWh",
-        f"Duck {fmt(g['duck_strength'], nd=2)}",
         f"Grid fee {fmt(g['grid_fee_eur_mwh'])} €/MWh",
         f"PTUs {g['ptu_count']} (dt={fmt(g['ptu_duration_hr'], nd=3)} h)"
     ]
@@ -394,6 +391,7 @@ with st.expander("1. Input data", expanded=True):
     if uploaded is None:
         # --- Scenario selector with buttons ---
         st.write("### Choose a scenario for synthetic data generation")
+        st.write("Load will be normalised to 1 MW average.")
 
         if 'scenario' not in st.session_state:
             st.session_state['scenario'] = "Profitable arbitrage"
@@ -407,7 +405,7 @@ with st.expander("1. Input data", expanded=True):
                 "pv_max_mw": 1.0,
                 "avg_price_eur_mwh": 70,
                 "feedin_discount_eur_mwh": 10,
-                "duck_strength": 0.7,
+                "duck_strength": 0.7, # obsolete
                 "grid_fee_eur_mwh": 5
             },
             "Load matches PV": {
@@ -417,7 +415,7 @@ with st.expander("1. Input data", expanded=True):
                 "pv_max_mw": 4.0,
                 "avg_price_eur_mwh": 60,
                 "feedin_discount_eur_mwh": 5,
-                "duck_strength": 0.3,
+                "duck_strength": 0.3, # obsolete
                 "grid_fee_eur_mwh": 8
             },
             "Flat load": {
@@ -427,7 +425,7 @@ with st.expander("1. Input data", expanded=True):
                 "pv_max_mw": 4.0,
                 "avg_price_eur_mwh": 70,
                 "feedin_discount_eur_mwh": 10,
-                "duck_strength": 0.6,
+                "duck_strength": 0.6, # obsolete
                 "grid_fee_eur_mwh": 30
             }
         }
@@ -468,7 +466,7 @@ with st.expander("1. Input data", expanded=True):
 
         with st.expander("Show / adjust scenario parameters", expanded=(st.session_state['scenario'] == "Custom")):
             # --- Input parameters (number_inputs) ---
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3 = st.columns(3)
             with col1:
                 base_load = st.number_input("Base CI& load (MW)", value=defaults.get("base_load_mw", 1.0))
                 grid_energy_fee = st.number_input("Grid energy fee (€/MWh)", value=defaults.get("grid_fee_eur_mwh", 10))
@@ -476,17 +474,13 @@ with st.expander("1. Input data", expanded=True):
                 daytime_peak = st.number_input("Daytime peak load (MW)", value=defaults.get("daytime_peak_mw", 1.0))
                 evening_peak = st.number_input("Evening peak load (MW)", value=defaults.get("evening_peak_mw", 1.0))
             with col3:
-                pv_max_mw = st.number_input("PV max power (MW)", value=defaults.get("pv_max_mw", 2.0))
-                feedin_discount = st.number_input("Feed-in discount (€/MWh)", value=defaults.get("feedin_discount_eur_mwh", 10))
-            with col4:
+                feedin_discount = st.number_input("Difference between cons and prod price (€/MWh)", value=defaults.get("feedin_discount_eur_mwh", 10))
                 avg_price = st.number_input("DA average price (€/MWh)", value=defaults.get("avg_price_eur_mwh", 80))
-                duck_strength = st.number_input("Duck curve strength (0=no duck)", 
-                                                min_value=0.0, max_value=2.0, step=0.1, 
-                                                value=defaults.get("duck_strength", 0.8))
+
 
 
         load_year, pv_year, price_year, feedin_year = generate_full_year_profiles(
-            T, pv_max_mw, base_load, daytime_peak, evening_peak, avg_price, feedin_discount, duck_strength
+            T, base_load, daytime_peak, evening_peak, avg_price, feedin_discount
         )
         df = pd.DataFrame({
             'load': load_year,
@@ -503,10 +497,8 @@ with st.expander("1. Input data", expanded=True):
             "grid_fee_eur_mwh": float(grid_energy_fee),
             "daytime_peak_mw": float(daytime_peak),
             "evening_peak_mw": float(evening_peak),
-            "pv_max_mw": float(pv_max_mw),
             "feedin_discount_eur_mwh": float(feedin_discount),
             "avg_price_eur_mwh": float(avg_price),
-            "duck_strength": float(duck_strength),
             "ptu_count": int(T),
             "ptu_duration_hr": float(dt)
         }
@@ -521,11 +513,36 @@ with st.expander("1. Input data", expanded=True):
     # normalise load
     df['load'] = df['load']/np.mean(np.abs(df['load']))
     
-    # normalise pv and multiply by input factor
-    pv_multiplier = st.number_input("PV Multiplier: average production divided by consumption", value=0.5, step=0.1)  # Multiply magnitude of PV generation by this factor
-    df['pv'] = df['pv']/np.mean(np.abs(df['pv']))
-    df['pv'] *= pv_multiplier
+    # calculate mean and variance assuming normal distribution
+    mean_cons_price = np.mean(df['use_price'])
+    mean_prod_price = np.mean(df['inject_price'])
+    
+    std_cons_price = np.std(df['use_price'])
+    std_prod_price = np.std(df['inject_price'])
 
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        # normalise pv and multiply by input factor
+        pv_multiplier = st.number_input("PV Multiplier: average production divided by consumption", value=0.5, step=0.1)  # Multiply magnitude of PV generation by this factor
+        st.write(f"Adjust pv profiles. The input will likely be changed to KWp instaled per MW of average load. Currently it is just a msimple multiplier.")
+        df['pv'] = df['pv']/np.mean(np.abs(df['pv']))
+        df['pv'] *= pv_multiplier
+    with col2:
+        # Add variance to dayahead prices
+        new_cons_price_std = st.number_input("Consumption price variance (std dev in €/MWh)", value=std_cons_price, step=1.0, min_value=std_cons_price/10)
+        st.write(f"The current dayahead load prices have mean {mean_cons_price:.2f} €/MWh and standard deviation {std_cons_price:.2f} €/MWh. Select a new value for the std below to adjust the variance around the yearly mean.")
+    with col3:
+        new_prod_price_std = st.number_input("Production price variance (std dev in €/MWh)", value=std_prod_price, step=1.0, min_value=std_prod_price/10)       
+        st.write(f"The current dayahead production prices have mean {mean_prod_price:.2f} €/MWh and standard deviation {std_prod_price:.2f} €/MWh. Select a new value for the std below to adjust the variance around the yearly mean.")
+
+    #renormalise the values by adjusting their current deviation from the mean to the new std dev
+    df['use_price'] = mean_cons_price + (df['use_price'] - mean_cons_price) * (new_cons_price_std / std_cons_price)
+    df['inject_price'] = mean_prod_price + (df['inject_price'] - mean_prod_price) * (new_prod_price_std / std_prod_price)
+
+    # check if all production prices are lower than consumption prices
+    if np.any(df['inject_price'] > df['use_price']):
+        st.warning("⚠️ Unexpectedly, some PTUs have higher feed-in prices than consumption prices. The model implementation does not handle this correctly." \
+        "Please check your input data and/or your variance settings (or continue at your own peril...)")
 
     # --- Preview first day ---
     if df is not None:
@@ -612,11 +629,7 @@ with st.expander("Optimisation", expanded=True):
         price_arr = df['use_price'].values[:T] if 'use_price' in df.columns else np.full(T, 0.20)
         feedin_arr = df['inject_price'].values[:T] if 'inject_price' in df.columns else np.full(T, feedin_discount)
         grid_fee_arr = df['grid_fee'].values[:T] if 'grid_fee' in df.columns else np.full(T, grid_energy_fee)
-        # else:
-        #     load_arr, pv_arr, price_arr, feedin_arr = generate_mock_profiles(
-        #         T, 80.0, 20.0, 60.0, 80.0, 0.20, feedin_discount, duck_strength=
-        #     )
-        #     grid_fee_arr = np.full(T, grid_energy_fee)
+
 
         # Wrap single-day as a mini DF if "First day only"
         if run_type == "First day only":
@@ -921,6 +934,44 @@ if summary_df is not None and best_size is not None:
         "Peak import with battery (MW)": peak_import_with_batt,
         "10% revenue (EUR/yr)": rev_10pct
     }])
+
+    # # --- Alternative more detailed export with additional metrics (uncomment to use) ---
+
+    # # Placeholder variables you need to define before this:
+    # import_cap = None  # MW
+    # demand_peak_charge = None  # k€/MW/yr
+    # annual_peak_load = None  # MW
+    # self_consumption_pct = None  # %
+    # idle_time_above_50 = None  # %
+    # idle_time_below_50 = None  # %
+
+    # # Build export DataFrame with new columns and order
+    # exp_summary_df = pd.DataFrame([{
+    #     "Input filename / Data generation settings": f"{uploaded.name if uploaded else 'generated'} / {summarise_generation_settings()}",
+    #     "Import cap (MW)": import_cap,
+    #     "Battery CapEx (k€/MW)": capex_total / best_size / 1000,
+    #     "Demand (peak) charge (k€/MW/yr)": demand_peak_charge,
+    #     "Best BESS size (MW)": best_size,
+    #     "Total savings per MW excl capex (EUR/MW/yr)": savings_excl_capex / best_size,
+    #     "Initial BESS investment (€)": capex_total,
+    #     "CapEx annual write-off (EUR/yr)": capex_annual,
+    #     "Total cost without BESS (EUR/yr)": cost_no_bess,
+    #     "Total cost with BESS - excl capex (EUR/yr)": op_cost_with_bess,
+    #     "Total cost with BESS - incl capex (EUR/yr)": total_cost_with_bess,
+    #     "Total savings incl capex (EUR/yr)": savings_incl_capex,
+    #     "Total savings excl capex (EUR/yr)": savings_excl_capex,
+    #     "Total savings per MW incl capex (EUR/MW/year)": savings_incl_capex / best_size,
+    #     "ROI (years)": payback_years,
+    #     "Annual peak load  (MW)": annual_peak_load,
+    #     "Peak import costs (EUR/yr)": annual_peak_load * demand_peak_charge * 1000,  # EUR/yr
+    #     "% self-consumption (if PV)": self_consumption_pct,
+    #     "Idle time >50% SOC (%)": idle_time_above_50,
+    #     "Idle time <50% SOC": idle_time_below_50
+    # }])
+
+    # # --- Download button ---
+    # exp_csv = exp_summary_df.to_csv(index=False).encode("utf-8")
+
 
     # --- Download button for the human-readable single-row experiment summary ---
     exp_csv = exp_summary_df.to_csv(index=False).encode("utf-8")
