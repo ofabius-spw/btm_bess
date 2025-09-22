@@ -393,100 +393,101 @@ with st.expander("1. Input data", expanded=True):
         type=["csv"]
     )
 
-    # --- Scenario selector with buttons ---
-    st.write("### Choose a scenario for synthetic data generation")
-
-    if 'scenario' not in st.session_state:
-        st.session_state['scenario'] = "Profitable arbitrage"
-
-    # Predefined scenarios
-    scenario_params = {
-        "Profitable arbitrage": {
-            "base_load_mw": 1.0,
-            "daytime_peak_mw": 1.0,
-            "evening_peak_mw": 1.0,
-            "pv_max_mw": 1.0,
-            "avg_price_eur_mwh": 70,
-            "feedin_discount_eur_mwh": 10,
-            "duck_strength": 0.7,
-            "grid_fee_eur_mwh": 5
-        },
-        "Load matches PV": {
-            "base_load_mw": 2.0,
-            "daytime_peak_mw": 4.0,
-            "evening_peak_mw": 2.0,
-            "pv_max_mw": 4.0,
-            "avg_price_eur_mwh": 60,
-            "feedin_discount_eur_mwh": 5,
-            "duck_strength": 0.3,
-            "grid_fee_eur_mwh": 8
-        },
-        "Flat load, high PV": {
-            "base_load_mw": 1.,
-            "daytime_peak_mw": 1.,
-            "evening_peak_mw": 1.,
-            "pv_max_mw": 4.0,
-            "avg_price_eur_mwh": 70,
-            "feedin_discount_eur_mwh": 10,
-            "duck_strength": 0.6,
-            "grid_fee_eur_mwh": 30
-        }
-    }
-
-    scenario_texts = {
-        "Profitable arbitrage": "Profitable arbitrage settings have a year round duck curve and a decently high price volatility. Any case like this, where profits from arbitrage outweigh write-offs, will result in the largest battery size being the most profitable.",
-        "Load matches PV": "Load matches pv settings show that BTM BESS is worse when the load profile is not very different the pv production. Day-ahead prices have a mild duck curve shape. This scenario should yield limited battery arbitrage opportunity and doesnt have a profitable business case",
-        "Flat load, high PV": "In this scenario there is a lot of overproduction of PV and a significant grid fee. Day-ahead alone are not volatile enough to provide a good business case. In cases like these, there will be an optimal battery size that will maximise self consumption. With these settings, the optimum is around 0.3 MW for standard capex of 700k and battery depth of 2 hrs.",
-        "Custom": "Adjust the parameters below to create your own scenario."
-    }
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        if st.button("Profitable arbitrage"):
-            st.session_state.update(scenario_params["Profitable arbitrage"])
-            st.session_state['scenario'] = "Profitable arbitrage"
-
-    with col2:
-        if st.button("Load matches PV"):
-            st.session_state.update(scenario_params["Load matches PV"])
-            st.session_state['scenario'] = "Load matches PV"
-
-    with col3:
-        if st.button("Flat load, high PV"):
-            st.session_state.update(scenario_params["Flat load, high PV"])
-            st.session_state['scenario'] = "Flat load, high PV"
-
-    with col4:
-        if st.button("Custom"):
-            st.session_state['scenario'] = "Custom"
-    st.write(scenario_texts[st.session_state['scenario']])
-    # Determine defaults for expander
-    defaults = scenario_params.get(st.session_state['scenario'], {})
-
-    # Only expand parameters for Custom scenario
-    expanded_state = st.session_state.get('scenario') == "Custom"
-
-    with st.expander("Show / adjust scenario parameters", expanded=(st.session_state['scenario'] == "Custom")):
-        # --- Input parameters (number_inputs) ---
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            base_load = st.number_input("Base CI& load (MW)", value=defaults.get("base_load_mw", 1.0))
-            grid_energy_fee = st.number_input("Grid energy fee (€/MWh)", value=defaults.get("grid_fee_eur_mwh", 10))
-        with col2: 
-            daytime_peak = st.number_input("Daytime peak load (MW)", value=defaults.get("daytime_peak_mw", 1.0))
-            evening_peak = st.number_input("Evening peak load (MW)", value=defaults.get("evening_peak_mw", 1.0))
-        with col3:
-            pv_max_mw = st.number_input("PV max power (MW)", value=defaults.get("pv_max_mw", 2.0))
-            feedin_discount = st.number_input("Feed-in discount (€/MWh)", value=defaults.get("feedin_discount_eur_mwh", 10))
-        with col4:
-            avg_price = st.number_input("DA average price (€/MWh)", value=defaults.get("avg_price_eur_mwh", 80))
-            duck_strength = st.number_input("Duck curve strength (0=no duck)", 
-                                            min_value=0.0, max_value=2.0, step=0.1, 
-                                            value=defaults.get("duck_strength", 0.8))
-
     # --- Generate synthetic data automatically if no upload or scenario selected ---
     if uploaded is None:
+        # --- Scenario selector with buttons ---
+        st.write("### Choose a scenario for synthetic data generation")
+
+        if 'scenario' not in st.session_state:
+            st.session_state['scenario'] = "Profitable arbitrage"
+
+        # Predefined scenarios
+        scenario_params = {
+            "Profitable arbitrage": {
+                "base_load_mw": 1.0,
+                "daytime_peak_mw": 1.0,
+                "evening_peak_mw": 1.0,
+                "pv_max_mw": 1.0,
+                "avg_price_eur_mwh": 70,
+                "feedin_discount_eur_mwh": 10,
+                "duck_strength": 0.7,
+                "grid_fee_eur_mwh": 5
+            },
+            "Load matches PV": {
+                "base_load_mw": 2.0,
+                "daytime_peak_mw": 4.0,
+                "evening_peak_mw": 2.0,
+                "pv_max_mw": 4.0,
+                "avg_price_eur_mwh": 60,
+                "feedin_discount_eur_mwh": 5,
+                "duck_strength": 0.3,
+                "grid_fee_eur_mwh": 8
+            },
+            "Flat load, high PV": {
+                "base_load_mw": 1.,
+                "daytime_peak_mw": 1.,
+                "evening_peak_mw": 1.,
+                "pv_max_mw": 4.0,
+                "avg_price_eur_mwh": 70,
+                "feedin_discount_eur_mwh": 10,
+                "duck_strength": 0.6,
+                "grid_fee_eur_mwh": 30
+            }
+        }
+
+        scenario_texts = {
+            "Profitable arbitrage": "Profitable arbitrage settings have a year round duck curve and a decently high price volatility. Any case like this, where profits from arbitrage outweigh write-offs, will result in the largest battery size being the most profitable.",
+            "Load matches PV": "Load matches pv settings show that BTM BESS is worse when the load profile is not very different the pv production. Day-ahead prices have a mild duck curve shape. This scenario should yield limited battery arbitrage opportunity and doesnt have a profitable business case",
+            "Flat load, high PV": "In this scenario there is a lot of overproduction of PV and a significant grid fee. Day-ahead alone are not volatile enough to provide a good business case. In cases like these, there will be an optimal battery size that will maximise self consumption. With these settings, the optimum is around 0.3 MW for standard capex of 700k and battery depth of 2 hrs.",
+            "Custom": "Adjust the parameters below to create your own scenario."
+        }
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            if st.button("Profitable arbitrage"):
+                st.session_state.update(scenario_params["Profitable arbitrage"])
+                st.session_state['scenario'] = "Profitable arbitrage"
+
+        with col2:
+            if st.button("Load matches PV"):
+                st.session_state.update(scenario_params["Load matches PV"])
+                st.session_state['scenario'] = "Load matches PV"
+
+        with col3:
+            if st.button("Flat load, high PV"):
+                st.session_state.update(scenario_params["Flat load, high PV"])
+                st.session_state['scenario'] = "Flat load, high PV"
+
+        with col4:
+            if st.button("Custom"):
+                st.session_state['scenario'] = "Custom"
+        st.write(scenario_texts[st.session_state['scenario']])
+        # Determine defaults for expander
+        defaults = scenario_params.get(st.session_state['scenario'], {})
+
+        # Only expand parameters for Custom scenario
+        expanded_state = st.session_state.get('scenario') == "Custom"
+
+        with st.expander("Show / adjust scenario parameters", expanded=(st.session_state['scenario'] == "Custom")):
+            # --- Input parameters (number_inputs) ---
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                base_load = st.number_input("Base CI& load (MW)", value=defaults.get("base_load_mw", 1.0))
+                grid_energy_fee = st.number_input("Grid energy fee (€/MWh)", value=defaults.get("grid_fee_eur_mwh", 10))
+            with col2: 
+                daytime_peak = st.number_input("Daytime peak load (MW)", value=defaults.get("daytime_peak_mw", 1.0))
+                evening_peak = st.number_input("Evening peak load (MW)", value=defaults.get("evening_peak_mw", 1.0))
+            with col3:
+                pv_max_mw = st.number_input("PV max power (MW)", value=defaults.get("pv_max_mw", 2.0))
+                feedin_discount = st.number_input("Feed-in discount (€/MWh)", value=defaults.get("feedin_discount_eur_mwh", 10))
+            with col4:
+                avg_price = st.number_input("DA average price (€/MWh)", value=defaults.get("avg_price_eur_mwh", 80))
+                duck_strength = st.number_input("Duck curve strength (0=no duck)", 
+                                                min_value=0.0, max_value=2.0, step=0.1, 
+                                                value=defaults.get("duck_strength", 0.8))
+
+
         load_year, pv_year, price_year, feedin_year = generate_full_year_profiles(
             T, pv_max_mw, base_load, daytime_peak, evening_peak, avg_price, feedin_discount, duck_strength
         )
@@ -499,27 +500,30 @@ with st.expander("1. Input data", expanded=True):
         })
         st.info(f"Synthetic data generated for scenario: {st.session_state['scenario']}")
 
+        # Save the generation settings for later use
+        st.session_state['generation_settings'] = {
+            "base_load_mw": float(base_load),
+            "grid_fee_eur_mwh": float(grid_energy_fee),
+            "daytime_peak_mw": float(daytime_peak),
+            "evening_peak_mw": float(evening_peak),
+            "pv_max_mw": float(pv_max_mw),
+            "feedin_discount_eur_mwh": float(feedin_discount),
+            "avg_price_eur_mwh": float(avg_price),
+            "duck_strength": float(duck_strength),
+            "ptu_count": int(T),
+            "ptu_duration_hr": float(dt)
+        }
     else:
         try:
             df = pd.read_csv(uploaded)
             st.session_state['df'] = df
             st.success("CSV loaded.")
+            pv_multiplier = st.number_input("PV Multiplier", value=1.0, step=0.1)  # Multiply magnitude of PV generation by this factor
+            df['pv'] *= pv_multiplier
+            st.write(f"PV profile scaled by factor {pv_multiplier:.2f}.")
         except Exception as e:
             st.error(f"Error reading CSV: {e}")
 
-    # Save the generation settings for later use
-    st.session_state['generation_settings'] = {
-        "base_load_mw": float(base_load),
-        "grid_fee_eur_mwh": float(grid_energy_fee),
-        "daytime_peak_mw": float(daytime_peak),
-        "evening_peak_mw": float(evening_peak),
-        "pv_max_mw": float(pv_max_mw),
-        "feedin_discount_eur_mwh": float(feedin_discount),
-        "avg_price_eur_mwh": float(avg_price),
-        "duck_strength": float(duck_strength),
-        "ptu_count": int(T),
-        "ptu_duration_hr": float(dt)
-    }
 
 
     # --- Preview first day ---
