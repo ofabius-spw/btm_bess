@@ -506,7 +506,6 @@ with st.expander("1. Input data", expanded=True):
         try:
             df = pd.read_csv(uploaded)
             st.success("CSV loaded.")
-            st.write(f"PV profile scaled by factor {pv_multiplier:.2f}.")
         except Exception as e:
             st.error(f"Error reading CSV: {e}")
 
@@ -520,7 +519,9 @@ with st.expander("1. Input data", expanded=True):
     std_cons_price = np.std(df['use_price'])
     std_prod_price = np.std(df['inject_price'])
 
-    col1, col2, col3 = st.columns(3)
+    col0, col1, col2, col3 = st.columns(4)
+    with col0:
+        disable_load = st.checkbox("Run business case with a load of 0. This setting will not affect pv generation", value=False)
     with col1:
         # normalise pv and multiply by input factor
         pv_multiplier = st.number_input("PV Multiplier: MWp installed capacity per MW of average load", value=0.5, step=0.1)  # Multiply magnitude of PV generation by this factor
@@ -543,7 +544,8 @@ with st.expander("1. Input data", expanded=True):
     if np.any(df['inject_price'] > df['use_price']):
         st.warning("⚠️ Unexpectedly, some PTUs have higher feed-in prices than consumption prices. The model implementation does not handle this correctly." \
         "Please check your input data and/or your variance settings (or continue at your own peril...)")
-
+    if disable_load:
+        df['load'] = 0.0
     # --- Preview first day ---
     if df is not None:
         first_day = df.iloc[:T]
