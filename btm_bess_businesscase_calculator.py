@@ -29,7 +29,7 @@ def get_user_inputs():
     soc_init_pct = st.sidebar.number_input("Start SoC (%)", value=40, step=1, min_value=0, max_value=100, format="%d")
     st.sidebar.write("40% is roughly optimal for default settings for load, PV and duck curve prices.")
     import_cap = st.sidebar.number_input("Import cap (mw)", value=50, step=1, format="%d")
-    export_cap = st.sidebar.number_input("Export cap (mw)", value=50, step=1, format="%d")
+    export_cap = st.sidebar.number_input("Export cap (mw) ", value=50, step=1, format="%d")
     demand_charge = st.sidebar.number_input("Demand (peak) charge (k€/mw/yr) - currently not implemented", value=0, max_value=0, format="%d")*1000
 
     with st.sidebar.expander("Fixed inputs", expanded=False):
@@ -523,7 +523,7 @@ with st.expander("1. Input data", expanded=True):
     col1, col2, col3 = st.columns(3)
     with col1:
         # normalise pv and multiply by input factor
-        pv_multiplier = st.number_input("PV Multiplier: average production divided by consumption", value=0.5, step=0.1)  # Multiply magnitude of PV generation by this factor
+        pv_multiplier = st.number_input("PV Multiplier: MWp installed capacity per MW of average load", value=0.5, step=0.1)  # Multiply magnitude of PV generation by this factor
         st.write(f"Adjust pv profiles. The input will likely be changed to KWp instaled per MW of average load. Currently it is just a msimple multiplier.")
         df['pv'] = df['pv']/np.mean(np.abs(df['pv']))
         df['pv'] *= pv_multiplier
@@ -917,63 +917,56 @@ if summary_df is not None and best_size is not None:
     peak_export_with_batt = np.max([0., daily_df[daily_df['size_mw'].round(2) == round(best_size,2)]['peak_import_with_batt'].min()])
     peak_export_without_batt = np.max([0., load_arr.min()])
 
-    # Build export DataFrame
-    exp_summary_df = pd.DataFrame([{
-        "Input data filename (or generated)": uploaded.name if uploaded else "generated",
-        "Data generation settings": summarise_generation_settings(),
-        "Best size (MW)": best_size,
-        "Cost without BESS (EUR/yr)": cost_no_bess,
-        "Operating cost with BESS (EUR/yr)": op_cost_with_bess,
-        "Total cost with BESS (EUR/yr)": total_cost_with_bess,
-        "Savings incl capex (EUR/yr)": savings_incl_capex,
-        "Savings excl capex (EUR/yr)": savings_excl_capex,
-        "CapEx total (EUR)": capex_total,
-        "CapEx annual (EUR/yr)": capex_annual,
-        "Payback (yrs)": payback_years,
-        "Peak import without battery (MW)": peak_import_without_batt,
-        "Peak import with battery (MW)": peak_import_with_batt,
-        "10% revenue (EUR/yr)": rev_10pct
-    }])
+    # Build export DataFrame - OBSOLETE
+    # exp_summary_df = pd.DataFrame([{
+    #     "Input data filename (or generated)": uploaded.name if uploaded else "generated",
+    #     "Data generation settings": summarise_generation_settings(),
+    #     "Best size (MW)": best_size,
+    #     "Cost without BESS (EUR/yr)": cost_no_bess,
+    #     "Operating cost with BESS (EUR/yr)": op_cost_with_bess,
+    #     "Total cost with BESS (EUR/yr)": total_cost_with_bess,
+    #     "Savings incl capex (EUR/yr)": savings_incl_capex,
+    #     "Savings excl capex (EUR/yr)": savings_excl_capex,
+    #     "CapEx total (EUR)": capex_total,
+    #     "CapEx annual (EUR/yr)": capex_annual,
+    #     "Payback (yrs)": payback_years,
+    #     "Peak import without battery (MW)": peak_import_without_batt,
+    #     "Peak import with battery (MW)": peak_import_with_batt,
+    #     "10% revenue (EUR/yr)": rev_10pct
+    # }])
 
     # # --- Alternative more detailed export with additional metrics (uncomment to use) ---
 
     # # Placeholder variables you need to define before this:
-    # import_cap = None  # MW
-    # demand_peak_charge = None  # k€/MW/yr
-    # annual_peak_load = None  # MW
-    # self_consumption_pct = None  # %
-    # idle_time_above_50 = None  # %
-    # idle_time_below_50 = None  # %
 
-    # # Build export DataFrame with new columns and order
-    # exp_summary_df = pd.DataFrame([{
-    #     "Input filename / Data generation settings": f"{uploaded.name if uploaded else 'generated'} / {summarise_generation_settings()}",
-    #     "Import cap (MW)": import_cap,
-    #     "Battery CapEx (k€/MW)": capex_total / best_size / 1000,
-    #     "Demand (peak) charge (k€/MW/yr)": demand_peak_charge,
-    #     "Best BESS size (MW)": best_size,
-    #     "Total savings per MW excl capex (EUR/MW/yr)": savings_excl_capex / best_size,
-    #     "Initial BESS investment (€)": capex_total,
-    #     "CapEx annual write-off (EUR/yr)": capex_annual,
-    #     "Total cost without BESS (EUR/yr)": cost_no_bess,
-    #     "Total cost with BESS - excl capex (EUR/yr)": op_cost_with_bess,
-    #     "Total cost with BESS - incl capex (EUR/yr)": total_cost_with_bess,
-    #     "Total savings incl capex (EUR/yr)": savings_incl_capex,
-    #     "Total savings excl capex (EUR/yr)": savings_excl_capex,
-    #     "Total savings per MW incl capex (EUR/MW/year)": savings_incl_capex / best_size,
-    #     "ROI (years)": payback_years,
-    #     "Annual peak load  (MW)": annual_peak_load,
-    #     "Peak import costs (EUR/yr)": annual_peak_load * demand_peak_charge * 1000,  # EUR/yr
-    #     "% self-consumption (if PV)": self_consumption_pct,
-    #     "Idle time >50% SOC (%)": idle_time_above_50,
-    #     "Idle time <50% SOC": idle_time_below_50
-    # }])
-
-    # # --- Download button ---
-    # exp_csv = exp_summary_df.to_csv(index=False).encode("utf-8")
+    # Build export DataFrame with new columns and order
+    exp_summary_df = pd.DataFrame([{
+        "Input filename": f"{uploaded.name if uploaded else 'generated'} ",
+        "Data generation settings": summarise_generation_settings(), # TODO: need to adjust this function!
+        "MWp per MW of average load": pv_multiplier,
+        "Import cap (MW)": params["import_cap"],
+        "Battery CapEx (k€/MW)": capex_total / best_size / 1000,
+        "Demand (peak) charge (k€/MW/yr)": params["demand_charge"],
+        "Best BESS size (MW)": best_size,
+        "Total savings per MW average load excl capex (EUR/MW/yr)": savings_excl_capex,
+        "Initial BESS investment (€)": capex_total,
+        "CapEx annual write-off (EUR/yr)": capex_annual,
+        "Total cost without BESS (EUR/yr)": cost_no_bess,
+        "Total cost with BESS - excl capex (EUR/yr)": op_cost_with_bess,
+        "Total cost with BESS - incl capex (EUR/yr)": total_cost_with_bess,
+        "Total savings incl capex (EUR/yr)": savings_incl_capex,
+        "Total savings excl capex (EUR/yr)": savings_excl_capex,
+        "Total savings per MW of BESS incl capex (EUR/MW/year)": savings_incl_capex / best_size,
+        "ROI (years)": payback_years,
+        "Annual peak load with BESS (MW)": peak_import_with_batt,
+        "Peak import costs (EUR/yr)": peak_import_with_batt * params["demand_charge"] * 1000,  # EUR/yr
+        "Pct self-consumption (if PV)": 'not implemented yet',
+        "Idle time >50% SOC (%)": np.mean(idle_high50_per_day), # take the mean
+        "Idle time <50% SOC": np.mean(idle_low50_per_day)
+    }])
 
 
-    # --- Download button for the human-readable single-row experiment summary ---
+    # --- Download button for single-row experiment summary ---
     exp_csv = exp_summary_df.to_csv(index=False).encode("utf-8")
 
     st.download_button(
