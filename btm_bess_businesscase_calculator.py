@@ -589,9 +589,9 @@ with st.expander("Optimisation", expanded=True):
 
     col_a, col_b, col_c = st.columns([1,1,1])
     with col_a:
-        min_size = st.number_input("Min size (mw)", value=0.1, step=.1, min_value=0.)
+        min_size = st.number_input("Min size (mw)", value=1., step=.1, min_value=0.)
     with col_b:
-        max_size = st.number_input("Max size (mw)", value=1., step=0.1, min_value=0.)
+        max_size = st.number_input("Max size (mw)", value=3., step=0.1, min_value=0.)
     with col_c:
         n_steps = st.number_input("Steps", value=1, step=1, min_value=1, max_value=100)
 
