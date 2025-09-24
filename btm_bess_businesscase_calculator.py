@@ -28,8 +28,8 @@ def get_user_inputs():
     st.sidebar.subheader("Operational settings")
     soc_init_pct = st.sidebar.number_input("Start SoC (%)", value=40, step=1, min_value=0, max_value=100, format="%d")
     st.sidebar.write("40% is roughly optimal for default settings for load, PV and duck curve prices.")
-    import_cap = st.sidebar.number_input("Import cap (mw)", value=50, step=1, format="%d")
-    export_cap = st.sidebar.number_input("Export cap (mw) ", value=50, step=1, format="%d")
+    import_cap = st.sidebar.number_input("Import cap (mw)", value=50., step=0.1, format="%2d")
+    export_cap = st.sidebar.number_input("Export cap (mw) ", value=50., step=0.1, format="%2d")
     demand_charge = st.sidebar.number_input("Demand (peak) charge (k€/mw/yr) - currently not implemented", value=0, max_value=0, format="%d")*1000
 
     with st.sidebar.expander("Fixed inputs", expanded=False):
@@ -112,15 +112,20 @@ def generate_full_year_profiles(T,  base_load, daytime_peak, evening_peak, avg_p
 
 
 
-def build_and_solve_lp(T, dt, load_profile, pv_profile, price_profile, feedin_profile, grid_fee_per_mwh, params):
+def build_and_solve_lp(T, dt, load_profile, pv_profile, price_profile, feedin_profile, grid_fee_per_mwh, params, penalty=1e-4):
     prob = LpProblem("BESS_day_opt_linear", LpMinimize)
 
     # Single battery power variable per PTU
     P = [LpVariable(f"P_{t}", lowBound=-params['max_power_mw'], upBound=params['max_power_mw']) for t in range(T)]
 
-    # Import/export to grid
-    Import = [LpVariable(f"Import_{t}", lowBound=0, upBound=params['import_cap']) for t in range(T)]
-    Export = [LpVariable(f"Export_{t}", lowBound=0, upBound=params['export_cap']) for t in range(T)]
+    # Net grid variable split into positive and negative parts for cost calculation
+    G_import = [LpVariable(f"G_import_{t}", lowBound=0, upBound=params['import_cap']) for t in range(T)]
+    G_export = [LpVariable(f"G_export_{t}", lowBound=0, upBound=params['export_cap']) for t in range(T)]
+    
+    # Signed net grid variable (for balance constraint)
+    G = [LpVariable(f"G_{t}") for t in range(T)]
+    for t in range(T):
+        prob += G[t] == G_import[t] - G_export[t]
 
     # Peak import for demand charges
     Peak = LpVariable("PeakImport", lowBound=0)
@@ -128,44 +133,56 @@ def build_and_solve_lp(T, dt, load_profile, pv_profile, price_profile, feedin_pr
     # SoC
     SoC = [LpVariable(f"SoC_{t}", lowBound=params['soc_min'], upBound=params['soc_max']) for t in range(T)]
 
-    # SoC dynamics (linear, symmetric efficiency)
+    # SoC dynamics with correct efficiency depending on charge/discharge
+    P_plus  = [LpVariable(f"P_plus_{t}", lowBound=0, upBound=params['max_power_mw']) for t in range(T)]
+    P_minus = [LpVariable(f"P_minus_{t}", lowBound=0, upBound=params['max_power_mw']) for t in range(T)]
+
     for t in range(T):
+        # link to main P variable
+        prob += P[t] == P_plus[t] - P_minus[t]
+
+        # SoC dynamics
         if t == 0:
-            prob += SoC[0] == params['soc_init'] + params['eta'] * P[0] * dt
+            prob += SoC[0] == params['soc_init'] + params['eta'] * P_plus[0] * dt - (1 / params['eta']) * P_minus[0] * dt
         else:
-            prob += SoC[t] == SoC[t-1] + params['eta'] * P[t] * dt
+            prob += SoC[t] == SoC[t-1] + params['eta'] * P_plus[t] * dt - (1 / params['eta']) * P_minus[t] * dt
+
     if params['end_of_day_soc_enforced']:
         prob += SoC[T-1] == params['soc_init']
 
+
     # Grid constraints
     for t in range(T):
-        prob += Import[t] - Export[t] == load_profile[t] - pv_profile[t] + P[t]
-        prob += Peak >= Import[t]
+        prob += G[t] == load_profile[t] - pv_profile[t] + P[t]
+        prob += Peak >= G_import[t]
 
-    # Objective
+    # Objective with tiny linear penalty to discourage simultaneous import/export
     obj_terms = [
-        lpSum(Import[t] * price_profile[t] * dt - 
-            Export[t] * feedin_profile[t] * dt + 
-            Import[t] * grid_fee_per_mwh[t] * dt
-            )
+        lpSum(
+            G_import[t] * price_profile[t] * dt        # import cost
+            - G_export[t] * feedin_profile[t] * dt    # export revenue
+            + G_import[t] * grid_fee_per_mwh[t] * dt # import fee
+            + penalty * (G_import[t] + G_export[t])  # tiny penalty
+        )
         for t in range(T)
     ]
-
     prob += lpSum(obj_terms)
 
+    # Solve
     prob.solve()
 
+    # Collect results
     results = {
         'P': [v.varValue for v in P],
         'SoC': [v.varValue for v in SoC],
-        'Import': [v.varValue for v in Import],
-        'Export': [v.varValue for v in Export],
+        'G_import': [v.varValue for v in G_import],
+        'G_export': [v.varValue for v in G_export],
+        'G': [v.varValue for v in G],
         'Peak': Peak.varValue,
         'objective': value(prob.objective)
     }
 
     return results
-
 
 def run_daily_optimisation(size_mw, load, pv, price, feedin, grid_fee_per_mwh, params):
     """
@@ -329,8 +346,8 @@ def plot_results(T, dt, load_profile, pv_profile, results):
     ax[1].plot(ts, results['P'], label='Battery power (mw) — +charging, -discharging')
     ax[1].legend(); ax[1].set_ylabel('mw')
 
-    ax[2].plot(ts, results['Import'], label='Import (mw)')
-    ax[2].plot(ts, results['Export'], label='Export (mw)')
+    ax[2].plot(ts, results['G_import'], label='Import (mw)')
+    ax[2].plot(ts, results['G_export'], label='Export (mw)')
     ax[2].plot(ts, results['SoC'], label='SoC (mwh)')
     ax[2].legend(); ax[2].set_ylabel('mw / mwh'); ax[2].set_xlabel('Hour')
     return fig
@@ -525,8 +542,8 @@ with st.expander("1. Input data", expanded=True):
     with col1:
         # normalise pv and multiply by input factor
         pv_multiplier = st.number_input("PV Multiplier: MWp installed capacity per MW of average load", value=0.5, step=0.1)  # Multiply magnitude of PV generation by this factor
-        st.write(f"Adjust pv profiles. The input will likely be changed to KWp instaled per MW of average load. Currently it is just a msimple multiplier.")
-        df['pv'] = df['pv']/np.mean(np.abs(df['pv']))
+        st.write(f"Adjust pv profiles. The input will likely be changed to KWp installed per MW of average load. Currently it is just a msimple multiplier.")
+        df['pv'] = df['pv']#/np.mean(np.abs(df['pv']))
         df['pv'] *= pv_multiplier
     with col2:
         # Add variance to dayahead prices
@@ -548,29 +565,115 @@ with st.expander("1. Input data", expanded=True):
         df['load'] = 0.0
     # --- Preview first day ---
     if df is not None:
-        first_day = df.iloc[:T]
-        st.subheader("Preview: first day")
-        col1, col2 = st.columns(2)
-        with col1:
-            ts = np.arange(T) * params['dt']
-            fig_profile, ax_profile = plt.subplots(figsize=(10,3))
-            ax_profile.plot(ts, first_day['load'].values, label='Load')
-            ax_profile.plot(ts, first_day['pv'].values, label='PV')
-            ax_profile.set_xlabel("Hour of day"); ax_profile.set_ylabel("Power (mw)")
-            ax_profile.set_title("Load and PV profiles"); ax_profile.grid(True)
-            ax_profile.legend()
-            st.pyplot(fig_profile)
 
-        # --- Day-ahead price plot ---
-        with col2:
-            ts = np.arange(T) * params['dt']
-            fig_price, ax_price = plt.subplots(figsize=(10, 3))
-            ax_price.plot(ts, first_day['use_price'], label='DA Price', color='tab:orange')
-            ax_price.set_xlabel("Hour of day"); ax_price.set_ylabel("Price (€/mwh)")
-            ax_price.set_title("Energy prices"); ax_price.grid(True); ax_price.legend()
-            # add feedin price
-            ax_price.plot(ts, first_day['inject_price'], label='Feed-in Price')
-            st.pyplot(fig_price)
+
+        # Number of PTUs per day
+        T = 96  # 15-minute intervals
+
+        # PTU within the day
+        df['ptu'] = df.index % T
+
+        # Compute average and variance per PTU
+        avg_load = df.groupby('ptu').apply(lambda x: (x['load'] + x['pv']).mean())
+
+        std_load = df.groupby('ptu').apply(lambda x: (x['load'] + x['pv']).std())
+
+        # Convert PTU to hours
+        hours = np.arange(T) * 24 / T  # 0, 0.25, 0.5, ..., 23.75
+if uploaded:
+    st.write("### Yearly overview of uploaded data")
+
+    # Number of PTUs per day (e.g., 15-min intervals → 96 PTUs/day)
+    PTU_per_day = 96
+
+    # Only keep full days
+    n_days = len(df) // PTU_per_day
+    df_trunc = df.iloc[:n_days * PTU_per_day]
+
+    # Reshape load into (days, PTUs)
+    load_reshaped = (df_trunc['load'] + df_trunc['pv']).values.reshape(n_days, PTU_per_day)
+
+
+    # Compute daily average and variance
+    avg_daily = pd.Series(load_reshaped.mean(axis=1), index=np.arange(1, n_days + 1))
+    std_daily = pd.Series(load_reshaped.std(axis=1), index=np.arange(1, n_days + 1))
+
+    # Hourly profile
+    col1, col2 = st.columns(2)
+
+    with col1:
+        # Daily profile
+        fig_daily, ax_daily = plt.subplots(figsize=(10, 3))
+        ax_daily.plot(avg_daily.index, avg_daily.values, label='Average Load', color='blue')
+        ax_daily.fill_between(avg_daily.index,
+                              avg_daily.values - np.sqrt(std_daily.values),
+                              avg_daily.values + np.sqrt(std_daily.values),
+                              color='blue', alpha=0.2, label='±1 Std Dev')
+        ax_daily.set_xlabel('Day of Year')
+        ax_daily.set_ylabel('Load')
+        ax_daily.set_title('Yearly net load profile averaged over the day')
+        ax_daily.legend()
+        ax_daily.grid(True)
+        st.pyplot(fig_daily)
+
+    with col2:
+        fig_hourly, ax_hourly = plt.subplots(figsize=(10, 3))
+        ax_hourly.plot(hours, avg_load.values, label='Average net load', color='blue')
+        ax_hourly.fill_between(hours,
+                               avg_load.values - std_load.values,
+                               avg_load.values + std_load.values,
+                               color='blue', alpha=0.2, label='±1 Std Dev')
+        ax_hourly.set_xlabel('Hour of Day')
+        ax_hourly.set_ylabel('Load')
+        ax_hourly.set_title('Net load profile averaged oveer the year with Variance')
+        ax_hourly.legend()
+        ax_hourly.grid(True)
+        plt.xticks(np.arange(0, 25, 2))
+        st.pyplot(fig_hourly)
+
+
+
+
+
+st.subheader(f"Inspect daily profiles")
+
+# day selector
+selected_day = st.number_input(
+    "Select day to view",
+    min_value=0,
+    max_value=(len(df)//T)-1,
+    value=0,
+    step=1,
+    key='selected_day'  # automatically stored in st.session_state['selected_day']
+)
+# Slice the dataframe for the selected day
+day_df = df.iloc[selected_day*T : (selected_day+1)*T]
+
+col1, col2 = st.columns(2)
+
+with col1:
+    ts = np.arange(T) * 24 / T  # convert PTUs to hours
+    fig_profile, ax_profile = plt.subplots(figsize=(10,3))
+    ax_profile.plot(ts, day_df['load'].values, label='Load')
+    ax_profile.plot(ts, day_df['pv'].values, label='PV')
+    ax_profile.set_xlabel("Hour of day")
+    ax_profile.set_ylabel("Power (MW)")
+    ax_profile.set_title("Load and PV profiles")
+    ax_profile.grid(True)
+    ax_profile.legend()
+    st.pyplot(fig_profile)
+
+with col2:
+    ts = np.arange(T) * 24 / T
+    fig_price, ax_price = plt.subplots(figsize=(10,3))
+    ax_price.plot(ts, day_df['use_price'], label='DA Price', color='tab:orange')
+    ax_price.plot(ts, day_df['inject_price'], label='Feed-in Price', color='tab:green')
+    ax_price.set_xlabel("Hour of day")
+    ax_price.set_ylabel("Price (€/MWh)")
+    ax_price.set_title("Energy prices")
+    ax_price.grid(True)
+    ax_price.legend()
+    st.pyplot(fig_price)
 
 
 # --- Battery size sweep (compact inputs on main page) ---
@@ -722,6 +825,27 @@ if summary_df is not None and best_size is not None:
     peak_import_with_batt = daily_df[daily_df['size_mw'].round(2) == round(best_size,2)]['peak_import_with_batt'].max()
     peak_import_without_batt = daily_df[daily_df['size_mw'].round(2) == round(best_size,2)]['cost_no_batt'].max()  # optional
 
+     # --- Compute idle hours per day by SOC <50% and >=50% ---
+    idle_low50_per_day = []
+    idle_high50_per_day = []
+    max_power = best_size  # MW
+    battery_power_positive = []
+    # battery_power_negative = []
+    for day_results in detailed_results.values():
+        P = np.array(day_results['P'])
+        SoC = np.array(day_results['SoC'])
+        idle_mask = np.abs(P) < 0.1 * max_power
+        soc_pct = SoC / (best_size * params['duration_hrs']) * 100
+        battery_power_positive.append(np.sum(P[P>0]))
+        # battery_power_negative.append(np.sum(P[P<0]))
+        idle_low50_per_day.append(np.sum(idle_mask & (soc_pct < 50)) * params['dt'])
+        idle_high50_per_day.append(np.sum(idle_mask & (soc_pct >= 50)) * params['dt'])
+
+    # calculate number of cycles
+    days = list(detailed_results.keys())
+    battery_power_positive_total = np.sum(battery_power_positive)
+    cycles_per_day = np.sum(battery_power_positive) * params['dt'] / (best_size * params['duration_hrs'] ) / len(days) 
+
     # Display metrics in 4 columns
     col1, col2, col3, col4 = st.columns(4)
 
@@ -735,7 +859,7 @@ if summary_df is not None and best_size is not None:
     col3.metric("Peak import with battery (MW)", f"{peak_import_with_batt:.2f}")
 
     col4.metric("Gross savings excl capex (k€)", f"{savings_excl_capex/1000:.2f}")
-    col4.metric("Annual revenue if 10% of savings (k€)", f"{rev_10pct/1000:.2f}")
+    col4.metric("Average number of (full) cycles per day:", f"{cycles_per_day:.2f}")
 
 
     with st.expander(f"View battery behavior for {best_size} MW (click to show)", expanded=False):
@@ -779,9 +903,9 @@ if summary_df is not None and best_size is not None:
                 label='PV (MW)', color=colors['PV (MW)'])
         ax2.plot(ts, results_day['P'],
                 label='Battery power (+charging, -discharging)', color=colors['Battery power (+charging, -discharging)'])
-        ax2.plot(ts, results_day['Import'],
+        ax2.plot(ts, results_day['G_import'],
                 label='Import', color=colors['Import'])
-        ax2.plot(ts, results_day['Export'],
+        ax2.plot(ts, results_day['G_export'],
                 label='Export', color=colors['Export'])
 
         # Add vertical dotted lines at every whole hour
@@ -796,21 +920,6 @@ if summary_df is not None and best_size is not None:
 
         st.pyplot(fig)
 
-        # --- Compute idle hours per day by SOC <50% and >=50% ---
-        idle_low50_per_day = []
-        idle_high50_per_day = []
-        max_power = best_size  # MW
-
-        for day_results in detailed_results.values():
-            P = np.array(day_results['P'])
-            SoC = np.array(day_results['SoC'])
-            idle_mask = np.abs(P) < 0.1 * max_power
-            soc_pct = SoC / (best_size * params['duration_hrs']) * 100
-
-            idle_low50_per_day.append(np.sum(idle_mask & (soc_pct < 50)) * params['dt'])
-            idle_high50_per_day.append(np.sum(idle_mask & (soc_pct >= 50)) * params['dt'])
-
-        days = list(detailed_results.keys())
 
         # --- Plot ---
         fig_idle, ax_idle = plt.subplots(figsize=(12,4))
@@ -848,8 +957,8 @@ if summary_df is not None and best_size is not None:
         'load_mw': df_run['load'].values[:T],
         'pv_mw': df_run['pv'].values[:T],
         'P_batt_mw': results_day['P'],
-        'Import_mw': results_day['Import'],
-        'Export_mw': results_day['Export'],
+        'Import_mw': results_day['G_import'],
+        'Export_mw': results_day['G_export'],
         'SoC_mwh': results_day['SoC'],
         'price_eur_mwh': df_run['use_price'].values[:T],
         'feedin_eur_mwh': df_run['inject_price'].values[:T],
@@ -919,28 +1028,6 @@ if summary_df is not None and best_size is not None:
     peak_export_with_batt = np.max([0., daily_df[daily_df['size_mw'].round(2) == round(best_size,2)]['peak_import_with_batt'].min()])
     peak_export_without_batt = np.max([0., load_arr.min()])
 
-    # Build export DataFrame - OBSOLETE
-    # exp_summary_df = pd.DataFrame([{
-    #     "Input data filename (or generated)": uploaded.name if uploaded else "generated",
-    #     "Data generation settings": summarise_generation_settings(),
-    #     "Best size (MW)": best_size,
-    #     "Cost without BESS (EUR/yr)": cost_no_bess,
-    #     "Operating cost with BESS (EUR/yr)": op_cost_with_bess,
-    #     "Total cost with BESS (EUR/yr)": total_cost_with_bess,
-    #     "Savings incl capex (EUR/yr)": savings_incl_capex,
-    #     "Savings excl capex (EUR/yr)": savings_excl_capex,
-    #     "CapEx total (EUR)": capex_total,
-    #     "CapEx annual (EUR/yr)": capex_annual,
-    #     "Payback (yrs)": payback_years,
-    #     "Peak import without battery (MW)": peak_import_without_batt,
-    #     "Peak import with battery (MW)": peak_import_with_batt,
-    #     "10% revenue (EUR/yr)": rev_10pct
-    # }])
-
-    # # --- Alternative more detailed export with additional metrics (uncomment to use) ---
-
-    # # Placeholder variables you need to define before this:
-
     # Build export DataFrame with new columns and order
     exp_summary_df = pd.DataFrame([{
         "Input filename": f"{uploaded.name if uploaded else 'generated'} ",
@@ -964,7 +1051,8 @@ if summary_df is not None and best_size is not None:
         "Peak import costs (EUR/yr)": peak_import_with_batt * params["demand_charge"] * 1000,  # EUR/yr
         "Pct self-consumption (if PV)": 'not implemented yet',
         "Idle time >50% SOC (%)": np.mean(idle_high50_per_day), # take the mean
-        "Idle time <50% SOC": np.mean(idle_low50_per_day)
+        "Idle time <50% SOC": np.mean(idle_low50_per_day),
+        "Average full cycles per day": cycles_per_day
     }])
 
 
