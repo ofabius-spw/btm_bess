@@ -9,6 +9,15 @@ from datetime import datetime
 import pytz
 import io
 
+from plotting import (
+    plot_daily_profiles,
+    plot_yearly_overview,
+    plot_cost_comparison,
+    plot_battery_behavior,
+    plot_idle_hours,
+    plot_daily_savings
+)
+
 
 # -----------------------
 # Helper functions
@@ -20,10 +29,6 @@ def get_user_inputs():
     st.sidebar.subheader("Battery specs")
     price_eur_per_mw = float(st.sidebar.number_input("Battery CapEx (k€/mw)", value=700, step=10, format="%d"))*1000
     project_horizon_yrs = float(st.sidebar.number_input("Project horizon (yrs)", value=10, step=1, format="%d"))
-    # duration_hrs = st.sidebar.number_input("Fixed cycle duration", value=2., disabled=True)
-    # eta = st.sidebar.number_input("Charging/discharging efficiency", value=0.95, disabled=True)
-    # soc_min_pct = st.sidebar.number_input("Minimum SoC (%)", value=5, disabled=True)
-    # soc_max_pct = st.sidebar.number_input("Maximum SoC (%)", value=95, disabled=True)
 
     st.sidebar.subheader("Operational settings")
     soc_init_pct = st.sidebar.number_input("Start SoC (%)", value=40, step=1, min_value=0, max_value=100, format="%d")
@@ -42,7 +47,6 @@ def get_user_inputs():
         dt = st.number_input("PTU duration in hours (only 0.25 is tested)", value=0.25, disabled=True)
     
     ptu_count = 24./float(dt)
-
     # Keep uploader out of sidebar per your request (we'll use main page uploader).
     return dict(
         ptu_count=ptu_count, dt=dt, 
@@ -52,7 +56,6 @@ def get_user_inputs():
         end_of_day_soc_enforced=end_of_day_soc_enforced,project_horizon_yrs=project_horizon_yrs,
         import_cap=import_cap, export_cap=export_cap, demand_charge=demand_charge, price_eur_per_mw=price_eur_per_mw
     )
-
 
 
 def generate_mock_profiles(T, base_load, daytime_peak, evening_peak, avg_price, feedin_discount):
@@ -72,9 +75,6 @@ def generate_mock_profiles(T, base_load, daytime_peak, evening_peak, avg_price, 
             load_profile[i] = base_load
 
     # --- Duck curve price profile ---
-    # Base = avg_price
-    # Midday dip (hours 10–16)
-    # --- Duck curve price profile ---
     morning_peak = np.exp(-0.5 * ((hours - 8) / 1.5) ** 2)
     midday_dip   = -np.exp(-0.5 * ((hours - 13) / 2.0) ** 2)
     evening_peak = np.exp(-0.5 * ((hours - 19) / 1.5) ** 2)
@@ -90,26 +90,17 @@ def generate_mock_profiles(T, base_load, daytime_peak, evening_peak, avg_price, 
 
 def generate_full_year_profiles(T,  base_load, daytime_peak, evening_peak, avg_price, feedin_discount):
     # single-day
-    day_load, day_pv, day_price, day_feedin = generate_mock_profiles(
+    load_year, pv_year, price_year, feedin_year = generate_mock_profiles(
         T, base_load, daytime_peak, evening_peak, avg_price, feedin_discount
     )
 
-    # tile for 365 days
-    load_year = np.tile(day_load, 365)
-    pv_year = np.tile(day_pv, 365)
-    price_year = np.tile(day_price, 365)
-    feedin_year = np.tile(day_feedin, 365)
-
-    # optional small daily noise
-    noise_scale = 0.0
-    for i in range(365):
-        idx = slice(i*T, (i+1)*T)
-        load_year[idx] *= 1 + noise_scale * (np.random.rand(T)-0.5)
-        pv_year[idx] *= 1 + noise_scale * (np.random.rand(T)-0.5)
-        price_year[idx] *= 1 + noise_scale * (np.random.rand(T)-0.5)
+    # # tile for 365 days
+    # load_year = np.tile(day_load, 365)
+    # pv_year = np.tile(day_pv, 365)
+    # price_year = np.tile(day_price, 365)
+    # feedin_year = np.tile(day_feedin, 365)
 
     return load_year, pv_year, price_year, feedin_year
-
 
 
 def build_and_solve_lp(T, dt, load_profile, pv_profile, price_profile, feedin_profile, grid_fee_per_mwh, params, penalty=1e-4):
@@ -286,7 +277,7 @@ def run_yearly_optimisation(sizes, df, params):
                 "cost_with_batt": cost_with_batt,
                 "savings": cost_no_batt - cost_with_batt,
                 "peak_import_no_batt": np.max(import_no_batt),
-                "peak_import_with_batt": results.get('Peak')
+                "peak_import_with_batt": np.max(results['G_import'])
             })
 
             # temporarily store detailed results for this size
@@ -334,23 +325,6 @@ def run_yearly_optimisation(sizes, df, params):
     summary_df = pd.DataFrame(summary_records)
     daily_df = pd.DataFrame(daily_records)
     return summary_df, daily_df, detailed_results, best_size
-
-def plot_results(T, dt, load_profile, pv_profile, results):
-    ts = np.arange(T) * dt
-    fig, ax = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
-    ax[0].plot(ts, load_profile, label='Load (mw)')
-    ax[0].plot(ts, pv_profile, label='PV (mw)')
-    ax[0].plot(ts, load_profile - pv_profile, label='Net before battery (mw)')
-    ax[0].legend(); ax[0].set_ylabel('mw')
-
-    ax[1].plot(ts, results['P'], label='Battery power (mw) — +charging, -discharging')
-    ax[1].legend(); ax[1].set_ylabel('mw')
-
-    ax[2].plot(ts, results['G_import'], label='Import (mw)')
-    ax[2].plot(ts, results['G_export'], label='Export (mw)')
-    ax[2].plot(ts, results['SoC'], label='SoC (mwh)')
-    ax[2].legend(); ax[2].set_ylabel('mw / mwh'); ax[2].set_xlabel('Hour')
-    return fig
 
 def summarise_generation_settings():
     """
@@ -422,7 +396,6 @@ with st.expander("1. Input data", expanded=True):
                 "pv_max_mw": 1.0,
                 "avg_price_eur_mwh": 70,
                 "feedin_discount_eur_mwh": 10,
-                "duck_strength": 0.7, # obsolete
                 "grid_fee_eur_mwh": 5
             },
             "Unviable (Load matches PV)": {
@@ -432,7 +405,6 @@ with st.expander("1. Input data", expanded=True):
                 "pv_max_mw": 4.0,
                 "avg_price_eur_mwh": 60,
                 "feedin_discount_eur_mwh": 5,
-                "duck_strength": 0.3, # obsolete
                 "grid_fee_eur_mwh": 8
             },
             "Viable for optimal BESS size": {
@@ -442,7 +414,6 @@ with st.expander("1. Input data", expanded=True):
                 "pv_max_mw": 4.0,
                 "avg_price_eur_mwh": 70,
                 "feedin_discount_eur_mwh": 10,
-                "duck_strength": 0.6, # obsolete
                 "grid_fee_eur_mwh": 30
             }
         }
@@ -504,7 +475,7 @@ with st.expander("1. Input data", expanded=True):
             'pv': pv_year,
             'use_price': price_year,
             'inject_price': feedin_year,
-            'grid_fee': np.full(365*T, grid_energy_fee)
+            'grid_fee': np.full(T, grid_energy_fee)
         })
         st.info(f"Synthetic data generated for scenario: {st.session_state['scenario']}")
 
@@ -563,72 +534,19 @@ with st.expander("1. Input data", expanded=True):
         "Please check your input data and/or your variance settings (or continue at your own peril...)")
     if disable_load:
         df['load'] = 0.0
-    # --- Preview first day ---
-    if df is not None:
-
-
-        # Number of PTUs per day
-        T = 96  # 15-minute intervals
-
-        # PTU within the day
-        df['ptu'] = df.index % T
-
-        # Compute average and variance per PTU
-        avg_load = df.groupby('ptu').apply(lambda x: (x['load'] + x['pv']).mean())
-
-        std_load = df.groupby('ptu').apply(lambda x: (x['load'] + x['pv']).std())
-
-        # Convert PTU to hours
-        hours = np.arange(T) * 24 / T  # 0, 0.25, 0.5, ..., 23.75
 if uploaded:
     st.write("### Yearly overview of uploaded data")
 
     # Number of PTUs per day (e.g., 15-min intervals → 96 PTUs/day)
     PTU_per_day = 96
 
-    # Only keep full days
-    n_days = len(df) // PTU_per_day
-    df_trunc = df.iloc[:n_days * PTU_per_day]
-
-    # Reshape load into (days, PTUs)
-    load_reshaped = (df_trunc['load'] + df_trunc['pv']).values.reshape(n_days, PTU_per_day)
-
-
-    # Compute daily average and variance
-    avg_daily = pd.Series(load_reshaped.mean(axis=1), index=np.arange(1, n_days + 1))
-    std_daily = pd.Series(load_reshaped.std(axis=1), index=np.arange(1, n_days + 1))
-
-    # Hourly profile
     col1, col2 = st.columns(2)
+    fig_daily, fig_hourly = plot_yearly_overview(df, PTU_per_day)
 
     with col1:
-        # Daily profile
-        fig_daily, ax_daily = plt.subplots(figsize=(10, 3))
-        ax_daily.plot(avg_daily.index, avg_daily.values, label='Average Load', color='blue')
-        ax_daily.fill_between(avg_daily.index,
-                              avg_daily.values - np.sqrt(std_daily.values),
-                              avg_daily.values + np.sqrt(std_daily.values),
-                              color='blue', alpha=0.2, label='±1 Std Dev')
-        ax_daily.set_xlabel('Day of Year')
-        ax_daily.set_ylabel('Load')
-        ax_daily.set_title('Yearly net load profile averaged over the day')
-        ax_daily.legend()
-        ax_daily.grid(True)
         st.pyplot(fig_daily)
 
     with col2:
-        fig_hourly, ax_hourly = plt.subplots(figsize=(10, 3))
-        ax_hourly.plot(hours, avg_load.values, label='Average net load', color='blue')
-        ax_hourly.fill_between(hours,
-                               avg_load.values - std_load.values,
-                               avg_load.values + std_load.values,
-                               color='blue', alpha=0.2, label='±1 Std Dev')
-        ax_hourly.set_xlabel('Hour of Day')
-        ax_hourly.set_ylabel('Load')
-        ax_hourly.set_title('Net load profile averaged oveer the year with Variance')
-        ax_hourly.legend()
-        ax_hourly.grid(True)
-        plt.xticks(np.arange(0, 25, 2))
         st.pyplot(fig_hourly)
 
 
@@ -646,33 +564,14 @@ selected_day = st.number_input(
     step=1,
     key='selected_day'  # automatically stored in st.session_state['selected_day']
 )
-# Slice the dataframe for the selected day
-day_df = df.iloc[selected_day*T : (selected_day+1)*T]
-
 col1, col2 = st.columns(2)
 
+fig_profile, fig_price = plot_daily_profiles(df, T, selected_day)
+
 with col1:
-    ts = np.arange(T) * 24 / T  # convert PTUs to hours
-    fig_profile, ax_profile = plt.subplots(figsize=(10,3))
-    ax_profile.plot(ts, day_df['load'].values, label='Load')
-    ax_profile.plot(ts, day_df['pv'].values, label='PV')
-    ax_profile.set_xlabel("Hour of day")
-    ax_profile.set_ylabel("Power (MW)")
-    ax_profile.set_title("Load and PV profiles")
-    ax_profile.grid(True)
-    ax_profile.legend()
     st.pyplot(fig_profile)
 
 with col2:
-    ts = np.arange(T) * 24 / T
-    fig_price, ax_price = plt.subplots(figsize=(10,3))
-    ax_price.plot(ts, day_df['use_price'], label='DA Price', color='tab:orange')
-    ax_price.plot(ts, day_df['inject_price'], label='Feed-in Price', color='tab:green')
-    ax_price.set_xlabel("Hour of day")
-    ax_price.set_ylabel("Price (€/MWh)")
-    ax_price.set_title("Energy prices")
-    ax_price.grid(True)
-    ax_price.legend()
     st.pyplot(fig_price)
 
 
@@ -709,17 +608,11 @@ with st.expander("Optimisation", expanded=True):
         st.write(f"Battery sizes to test ({len(battery_sizes)}): {[f'{x:.1f}' for x in battery_sizes]}")
         if len(battery_sizes) > 10 and run_type == "Full year":
             st.warning(f"⚠️ Too many battery sizes selected ({len(battery_sizes)}). Please choose ≤ 10.")
- 
-    optimisation_complete = 1
-    st.session_state['optimisation_complete'] = 0
 
 
-    # Add a horizontal line
+    # Run optimisation display
     st.markdown("---")
-
-    # Add some spacing
     st.write("\n")
-
     st.markdown("""
         <div style="font-size:24px; font-weight:bold; text-align:left;">
         🚀 Run Optimisation 🚀
@@ -728,13 +621,11 @@ with st.expander("Optimisation", expanded=True):
     if st.button("(re-)Run Optimisation"):
 
         # --- Prepare DF for optimisation ---
-        # if df is not None:
         load_arr = df['load'].values[:T]
         pv_arr = df['pv'].values[:T]
         price_arr = df['use_price'].values[:T] if 'use_price' in df.columns else np.full(T, 0.20)
         feedin_arr = df['inject_price'].values[:T] if 'inject_price' in df.columns else np.full(T, feedin_discount)
         grid_fee_arr = df['grid_fee'].values[:T] if 'grid_fee' in df.columns else np.full(T, grid_energy_fee)
-
 
         # Wrap single-day as a mini DF if "First day only"
         if run_type == "First day only":
@@ -750,32 +641,13 @@ with st.expander("Optimisation", expanded=True):
         # --- Run yearly optimisation (1 day or full year) ---
         summary_df, daily_df, detailed_results, best_size = run_yearly_optimisation(battery_sizes, df_run, params)
 
-        # # Store results in session_state
-        # st.session_state['summary_df'] = summary_df
-        # st.session_state['daily_df'] = daily_df
-        # st.session_state['detailed_results'] = detailed_results
-        # st.session_state['best_size'] = best_size
-        # st.session_state['optimisation_complete'] = 1
-        optimisation_complete = 1
-
 
         # with st.expander("Results exploration", expanded=True):
 if summary_df is not None:        
     with st.expander("Battery size sweep results (click to show)", expanded=False):
         if len(battery_sizes) > 1:
             # --- Cost plot ---
-            fig, ax = plt.subplots(figsize=(10,4))
-            ax.plot(summary_df['size_mw'], summary_df['annual_cost_no_batt']/1000,
-                    label='No battery (k€)', linestyle="--", marker='o')
-            ax.plot(summary_df['size_mw'], summary_df['annual_operating_cost_with_batt']/1000,
-                    label='With battery excl. capex (k€)', marker='o')
-            ax.plot(summary_df['size_mw'], summary_df['annual_cost_with_batt_incl_capex']/1000,
-                    label='With battery incl. capex (k€)', marker='o')
-            ax.set_xlabel("Battery size (MW)")
-            ax.set_ylabel("Annual cost (k€)")
-            ax.set_title("Annual costs vs battery size")
-            ax.grid(True)
-            ax.legend()
+            fig = plot_cost_comparison(summary_df)
             st.pyplot(fig)
 
         else:
@@ -787,14 +659,13 @@ if summary_df is not None:
             )
 
     # --- Select day to display ---
-    # day_to_show = st.number_input("Select day to display", 1)
     day_to_show = 1
     daily_display = daily_df[(daily_df['day'] == day_to_show) & 
                         (daily_df['size_mw'].round(2) == round(best_size, 2))].iloc[0]
 
-    # --- Show summary metrics ---
+
 # -----------------------
-# Corrected summary metrics
+# Summary metrics
 # -----------------------
 
 if summary_df is not None and best_size is not None:
@@ -825,26 +696,25 @@ if summary_df is not None and best_size is not None:
     peak_import_with_batt = daily_df[daily_df['size_mw'].round(2) == round(best_size,2)]['peak_import_with_batt'].max()
     peak_import_without_batt = daily_df[daily_df['size_mw'].round(2) == round(best_size,2)]['cost_no_batt'].max()  # optional
 
-     # --- Compute idle hours per day by SOC <50% and >=50% ---
+    # --- Calculate metrics from detailed results ---
+    battery_power_positive = []
     idle_low50_per_day = []
     idle_high50_per_day = []
-    max_power = best_size  # MW
-    battery_power_positive = []
-    # battery_power_negative = []
+
     for day_results in detailed_results.values():
         P = np.array(day_results['P'])
         SoC = np.array(day_results['SoC'])
-        idle_mask = np.abs(P) < 0.1 * max_power
-        soc_pct = SoC / (best_size * params['duration_hrs']) * 100
+
+        # Calculate cycles
         battery_power_positive.append(np.sum(P[P>0]))
-        # battery_power_negative.append(np.sum(P[P<0]))
+
+        # Calculate idle hours
+        idle_mask = np.abs(P) < 0.1 * best_size
+        soc_pct = SoC / (best_size * params['duration_hrs']) * 100
         idle_low50_per_day.append(np.sum(idle_mask & (soc_pct < 50)) * params['dt'])
         idle_high50_per_day.append(np.sum(idle_mask & (soc_pct >= 50)) * params['dt'])
 
-    # calculate number of cycles
-    days = list(detailed_results.keys())
-    battery_power_positive_total = np.sum(battery_power_positive)
-    cycles_per_day = np.sum(battery_power_positive) * params['dt'] / (best_size * params['duration_hrs'] ) / len(days) 
+    cycles_per_day = np.sum(battery_power_positive) * params['dt'] / (best_size * params['duration_hrs']) / len(detailed_results) 
 
     # Display metrics in 4 columns
     col1, col2, col3, col4 = st.columns(4)
@@ -865,83 +735,18 @@ if summary_df is not None and best_size is not None:
     with st.expander(f"View battery behavior for {best_size} MW (click to show)", expanded=False):
 
         # --- Plot results for selected day ---
-
         results_day = detailed_results[day_to_show]
-        ts = np.arange(T) * params['dt']
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-
-        # Define colors for each line (max contrast, avoid light yellow)
-        colors = {
-            'Load (MW)': 'tab:blue',
-            'PV (MW)': 'tab:green',
-            'Net before battery': 'tab:orange',
-            'Battery power (+charging, -discharging)': 'tab:red',
-            'Import': 'tab:purple',
-            'Export': 'tab:brown',
-            'SoC (MWh)': 'black'
-        }
-
-        # --- First subplot: battery power, SoC, net before battery ---
-        ax1.plot(ts, df_run['load'].values[:T] - df_run['pv'].values[:T],
-                label='Net before battery', color=colors['Net before battery'])
-        ax1.plot(ts, results_day['P'],
-                label='Battery power (+charging, -discharging)', color=colors['Battery power (+charging, -discharging)'])
-        ax1.plot(ts, results_day['SoC'],
-                label='SoC (MWh)', color=colors['SoC (MWh)'])
-        ax1.plot(ts, df_run['use_price'].values[:T]/100, label='Price (100€/MWh)', color='tab:gray')
-
-
-        ax1.set_ylabel('MW / MWh')
-        ax1.set_title(f"Day {day_to_show} profiles (Battery size: {best_size} MW)")
-        ax1.legend(loc='lower center', bbox_to_anchor=(0.5, 1.15), ncol=3)
-        ax1.grid(True)
-
-        # --- Second subplot: load, PV, battery power, import/export ---
-        ax2.plot(ts, df_run['load'].values[:T],
-                label='Load (MW)', color=colors['Load (MW)'])
-        ax2.plot(ts, df_run['pv'].values[:T],
-                label='PV (MW)', color=colors['PV (MW)'])
-        ax2.plot(ts, results_day['P'],
-                label='Battery power (+charging, -discharging)', color=colors['Battery power (+charging, -discharging)'])
-        ax2.plot(ts, results_day['G_import'],
-                label='Import', color=colors['Import'])
-        ax2.plot(ts, results_day['G_export'],
-                label='Export', color=colors['Export'])
-
-        # Add vertical dotted lines at every whole hour
-        for hour in range(int(ts[-1]) + 1):
-            ax1.axvline(x=hour, color='gray', linestyle=':', linewidth=0.8)
-            ax2.axvline(x=hour, color='gray', linestyle=':', linewidth=0.8)
-
-        ax2.set_xlabel('Hour')
-        ax2.set_ylabel('MW')
-        ax2.legend(loc='upper center', bbox_to_anchor=(0.5, 1.15), ncol=3)
-        ax2.grid(True)
-
+        fig = plot_battery_behavior(results_day, df_run, T, params, best_size, day_to_show)
         st.pyplot(fig)
 
-
-        # --- Plot ---
-        fig_idle, ax_idle = plt.subplots(figsize=(12,4))
-        ax_idle.bar(days, idle_low50_per_day, color='tab:orange', label='SOC < 50%')
-        ax_idle.bar(days, idle_high50_per_day, bottom=idle_low50_per_day, color='tab:blue', label='SOC ≥ 50%')
-        ax_idle.set_xlabel("Day of year")
-        ax_idle.set_ylabel("Idle hours per day")
-        ax_idle.set_title(f"Daily idle (<10% of max power) hours for best battery size ({best_size} MW)")
-        ax_idle.legend()
-        ax_idle.grid(True, linestyle='--', alpha=0.5)
-
+        # --- Plot idle hours ---
+        fig_idle = plot_idle_hours(detailed_results, best_size, params)
         st.pyplot(fig_idle)
     
 
     if run_type == "Full year":
         # --- Daily summary Plot ---
-        best_daily_df = daily_df[daily_df['size_mw'].round(2) == round(best_size, 2)]
-        fig_daily, ax_daily = plt.subplots(figsize=(12,4))
-        ax_daily.set_xlabel("Day of year")
-        ax_daily.set_ylabel("Daily savings (eur)")
-        ax_daily.set_title(f"Savings per day for best battery size ({best_size} MW)")
-        ax_daily.plot(best_daily_df['savings'])
+        fig_daily = plot_daily_savings(daily_df, best_size)
         st.pyplot(fig_daily)
 
 
@@ -981,11 +786,12 @@ if summary_df is not None and best_size is not None:
     idle_total_per_day = []
     idle_low_per_day = []
     idle_high_per_day = []
-
+    # get the selected max power of the battery   
+    # best_size = best_summary_row['size_mw'] 
     for day_results in detailed_results.values():
         P = np.array(day_results['P'])
         SoC = np.array(day_results['SoC'])
-        idle_mask = np.abs(P) < 0.1 * max_power  # idle if abs(power) < 10% max power
+        idle_mask = np.abs(P) < 0.1 * best_summary_row['size_mw']  # idle if abs(power) < 10% max power
         soc_pct = SoC / (best_size * params['duration_hrs']) * 100  # % of capacity
 
         idle_total_per_day.append(np.sum(idle_mask) * params['dt'])
@@ -1024,9 +830,6 @@ if summary_df is not None and best_size is not None:
     # Peak import
     peak_import_with_batt = daily_df[daily_df['size_mw'].round(2) == round(best_size,2)]['peak_import_with_batt'].max()
     peak_import_without_batt = load_arr.max()
-
-    peak_export_with_batt = np.max([0., daily_df[daily_df['size_mw'].round(2) == round(best_size,2)]['peak_import_with_batt'].min()])
-    peak_export_without_batt = np.max([0., load_arr.min()])
 
     # Build export DataFrame with new columns and order
     exp_summary_df = pd.DataFrame([{
