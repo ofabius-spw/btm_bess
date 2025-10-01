@@ -33,6 +33,8 @@ def get_user_inputs():
     st.sidebar.subheader("Operational settings")
     soc_init_pct = st.sidebar.number_input("Start SoC (%)", value=40, step=1, min_value=0, max_value=100, format="%d")
     st.sidebar.write("40% is roughly optimal for default settings for load, PV and duck curve prices.")
+    apply_curtailment = st.sidebar.checkbox("Apply PV curtailment (no grid export)", value=False)
+    st.sidebar.write("When enabled, PV generation is curtailed to prevent grid export in both with/without battery cases.")
     import_cap = st.sidebar.number_input("Import cap (mw)", value=50., step=0.1)
     export_cap = st.sidebar.number_input("Export cap (mw) ", value=50., step=0.1)
     demand_charge = st.sidebar.number_input("Demand (peak) charge (k€/mw/yr) - currently not implemented", value=0, max_value=0, format="%d")*1000
@@ -49,12 +51,13 @@ def get_user_inputs():
     ptu_count = 24./float(dt)
     # Keep uploader out of sidebar per your request (we'll use main page uploader).
     return dict(
-        ptu_count=ptu_count, dt=dt, 
-        duration_hrs=duration_hrs, 
+        ptu_count=ptu_count, dt=dt,
+        duration_hrs=duration_hrs,
         eta=eta,
         soc_init_pct=soc_init_pct, soc_min_pct=soc_min_pct, soc_max_pct=soc_max_pct,
         end_of_day_soc_enforced=end_of_day_soc_enforced,project_horizon_yrs=project_horizon_yrs,
-        import_cap=import_cap, export_cap=export_cap, demand_charge=demand_charge, price_eur_per_mw=price_eur_per_mw
+        import_cap=import_cap, export_cap=export_cap, demand_charge=demand_charge, price_eur_per_mw=price_eur_per_mw,
+        apply_curtailment=apply_curtailment
     )
 
 
@@ -103,16 +106,23 @@ def generate_full_year_profiles(T,  base_load, daytime_peak, evening_peak, avg_p
     return load_year, pv_year, price_year, feedin_year
 
 
-def build_and_solve_lp(T, dt, load_profile, pv_profile, price_profile, feedin_profile, grid_fee_per_mwh, params, penalty=1e-4):
+def build_and_solve_lp(T, dt, load_profile, pv_profile, price_profile, feedin_profile, grid_fee_per_mwh, params, penalty=1e-4, apply_curtailment=False):
     prob = LpProblem("BESS_day_opt_linear", LpMinimize)
 
     # Single battery power variable per PTU
     P = [LpVariable(f"P_{t}", lowBound=-params['max_power_mw'], upBound=params['max_power_mw']) for t in range(T)]
 
+    # PV curtailment variable: actual PV used (can be curtailed if needed)
+    if apply_curtailment:
+        PV_used = [LpVariable(f"PV_used_{t}", lowBound=0, upBound=pv_profile[t]) for t in range(T)]
+    else:
+        # If no curtailment, PV used equals full PV profile (fixed)
+        PV_used = pv_profile
+
     # Net grid variable split into positive and negative parts for cost calculation
     G_import = [LpVariable(f"G_import_{t}", lowBound=0, upBound=params['import_cap']) for t in range(T)]
     G_export = [LpVariable(f"G_export_{t}", lowBound=0, upBound=params['export_cap']) for t in range(T)]
-    
+
     # Signed net grid variable (for balance constraint)
     G = [LpVariable(f"G_{t}") for t in range(T)]
     for t in range(T):
@@ -144,8 +154,11 @@ def build_and_solve_lp(T, dt, load_profile, pv_profile, price_profile, feedin_pr
 
     # Grid constraints
     for t in range(T):
-        prob += G[t] == load_profile[t] - pv_profile[t] + P[t]
+        prob += G[t] == load_profile[t] - PV_used[t] + P[t]
         prob += Peak >= G_import[t]
+        # Curtailment constraint: no grid export allowed
+        if apply_curtailment:
+            prob += G[t] >= 0
 
     # Objective with tiny linear penalty to discourage simultaneous import/export
     obj_terms = [
@@ -198,7 +211,8 @@ def run_daily_optimisation(size_mw, load, pv, price, feedin, grid_fee_per_mwh, p
         price_profile=price,
         feedin_profile=feedin,
         grid_fee_per_mwh=grid_fee_per_mwh,
-        params=params_copy
+        params=params_copy,
+        apply_curtailment=params_copy.get('apply_curtailment', False)
     )
 
 
@@ -251,7 +265,13 @@ def run_yearly_optimisation(sizes, df, params):
             grid_fee_per_mwh = df['grid_fee'].values[idx]
 
             # --- no battery cost for this day (daily EUR)
-            net_no_batt = load - pv
+            # Apply curtailment if enabled
+            if params.get('apply_curtailment', False):
+                pv_curtailed = np.minimum(pv, load)
+            else:
+                pv_curtailed = pv
+
+            net_no_batt = load - pv_curtailed
             import_no_batt = np.maximum(net_no_batt, 0.0)
             export_no_batt = np.maximum(-net_no_batt, 0.0)
             cost_no_batt = (
