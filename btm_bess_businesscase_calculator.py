@@ -33,8 +33,8 @@ def get_user_inputs():
     st.sidebar.subheader("Operational settings")
     soc_init_pct = st.sidebar.number_input("Start SoC (%)", value=40, step=1, min_value=0, max_value=100, format="%d")
     st.sidebar.write("40% is roughly optimal for default settings for load, PV and duck curve prices.")
-    import_cap = st.sidebar.number_input("Import cap (mw)", value=50., step=0.1, format="%2d")
-    export_cap = st.sidebar.number_input("Export cap (mw) ", value=50., step=0.1, format="%2d")
+    import_cap = st.sidebar.number_input("Import cap (mw)", value=50., step=0.1)
+    export_cap = st.sidebar.number_input("Export cap (mw) ", value=50., step=0.1)
     demand_charge = st.sidebar.number_input("Demand (peak) charge (k€/mw/yr) - currently not implemented", value=0, max_value=0, format="%d")*1000
 
     with st.sidebar.expander("Fixed inputs", expanded=False):
@@ -354,24 +354,16 @@ def summarise_generation_settings():
     return "; ".join(parts)
 
 # -----------------------
-# Streamlit app
+# Streamlit UI Functions
 # -----------------------
-summary_df = None
-st.set_page_config(layout="wide", page_title="BTM BESS optimiser and business case")
-st.title("BTM BESS optimiser and business case")
-st.write("Otto Fabius - Sympower - September 2025")
 
-params = get_user_inputs()
-T = int(params['ptu_count'])
-load_arr = np.zeros(T)
-pv_arr = np.zeros(T)
-price_arr = np.zeros(T)
-feedin_arr = np.zeros(T)
-grid_fee_arr = np.zeros(T)
-dt = params['dt']
+def render_data_input_section(params):
+    """Handle data upload or generation, with scenario selection and adjustments.
 
-# --- Unified data input (upload or generate) ---
-with st.expander("1. Input data", expanded=True):
+    Returns:
+        tuple: (df, uploaded, pv_multiplier)
+    """
+    T = int(params['ptu_count'])
 
     uploaded = st.file_uploader(
         "Upload yearly CSV (expected 365 × PTUs rows). Required columns: load, pv, use_price, inject_price, grid_fee",
@@ -488,7 +480,7 @@ with st.expander("1. Input data", expanded=True):
             "feedin_discount_eur_mwh": float(feedin_discount),
             "avg_price_eur_mwh": float(avg_price),
             "ptu_count": int(T),
-            "ptu_duration_hr": float(dt)
+            "ptu_duration_hr": float(params['dt'])
         }
     else:
         try:
@@ -534,60 +526,62 @@ with st.expander("1. Input data", expanded=True):
         "Please check your input data and/or your variance settings (or continue at your own peril...)")
     if disable_load:
         df['load'] = 0.0
-if uploaded:
-    st.write("### Yearly overview of uploaded data")
 
-    # Number of PTUs per day (e.g., 15-min intervals → 96 PTUs/day)
-    PTU_per_day = 96
+    return df, uploaded, pv_multiplier
 
+
+def render_yearly_overview_section(df, uploaded):
+    """Display yearly load profile overview for uploaded data."""
+    if uploaded:
+        st.write("### Yearly overview of uploaded data")
+
+        # Number of PTUs per day (e.g., 15-min intervals → 96 PTUs/day)
+        PTU_per_day = 96
+
+        col1, col2 = st.columns(2)
+        fig_daily, fig_hourly = plot_yearly_overview(df, PTU_per_day)
+
+        with col1:
+            st.pyplot(fig_daily)
+
+        with col2:
+            st.pyplot(fig_hourly)
+
+
+def render_daily_profile_inspector(df, T):
+    """Interactive daily profile viewer with day selector."""
+    st.subheader(f"Inspect daily profiles")
+
+    # day selector
+    selected_day = st.number_input(
+        "Select day to view",
+        min_value=0,
+        max_value=(len(df)//T)-1,
+        value=0,
+        step=1,
+        key='selected_day'  # automatically stored in st.session_state['selected_day']
+    )
     col1, col2 = st.columns(2)
-    fig_daily, fig_hourly = plot_yearly_overview(df, PTU_per_day)
+
+    fig_profile, fig_price = plot_daily_profiles(df, T, selected_day)
 
     with col1:
-        st.pyplot(fig_daily)
+        st.pyplot(fig_profile)
 
     with col2:
-        st.pyplot(fig_hourly)
+        st.pyplot(fig_price)
 
 
+def render_optimization_section(df, params, uploaded, pv_multiplier):
+    """Optimization settings and execution.
 
+    Returns:
+        dict or None: Dictionary with optimization results if run, None otherwise
+    """
+    T = int(params['ptu_count'])
 
-
-st.subheader(f"Inspect daily profiles")
-
-# day selector
-selected_day = st.number_input(
-    "Select day to view",
-    min_value=0,
-    max_value=(len(df)//T)-1,
-    value=0,
-    step=1,
-    key='selected_day'  # automatically stored in st.session_state['selected_day']
-)
-col1, col2 = st.columns(2)
-
-fig_profile, fig_price = plot_daily_profiles(df, T, selected_day)
-
-with col1:
-    st.pyplot(fig_profile)
-
-with col2:
-    st.pyplot(fig_price)
-
-
-# --- Battery size sweep (compact inputs on main page) ---
-with st.expander("Optimisation", expanded=True):
+    # --- Battery size sweep (compact inputs on main page) ---
     run_type = st.radio("Optimisation horizon", ["First day only", "Full year"])
-    if run_type == "First day only":
-        df_run = pd.DataFrame({
-            'load': load_arr,
-            'pv': pv_arr,
-            'use_price': price_arr,
-            'inject_price': feedin_arr,
-            'grid_fee': grid_fee_arr
-        })
-    else:
-        df_run = df
 
     col_a, col_b, col_c = st.columns([1,1,1])
     with col_a:
@@ -623,9 +617,9 @@ with st.expander("Optimisation", expanded=True):
         # --- Prepare DF for optimisation ---
         load_arr = df['load'].values[:T]
         pv_arr = df['pv'].values[:T]
-        price_arr = df['use_price'].values[:T] if 'use_price' in df.columns else np.full(T, 0.20)
-        feedin_arr = df['inject_price'].values[:T] if 'inject_price' in df.columns else np.full(T, feedin_discount)
-        grid_fee_arr = df['grid_fee'].values[:T] if 'grid_fee' in df.columns else np.full(T, grid_energy_fee)
+        price_arr = df['use_price'].values[:T]
+        feedin_arr = df['inject_price'].values[:T]
+        grid_fee_arr = df['grid_fee'].values[:T]
 
         # Wrap single-day as a mini DF if "First day only"
         if run_type == "First day only":
@@ -641,9 +635,38 @@ with st.expander("Optimisation", expanded=True):
         # --- Run yearly optimisation (1 day or full year) ---
         summary_df, daily_df, detailed_results, best_size = run_yearly_optimisation(battery_sizes, df_run, params)
 
+        # Store in session state
+        st.session_state['optimization_results'] = {
+            'summary_df': summary_df,
+            'daily_df': daily_df,
+            'detailed_results': detailed_results,
+            'best_size': best_size,
+            'df_run': df_run,
+            'battery_sizes': battery_sizes,
+            'run_type': run_type,
+            'uploaded': uploaded,
+            'pv_multiplier': pv_multiplier
+        }
 
-        # with st.expander("Results exploration", expanded=True):
-if summary_df is not None:        
+    # Return results from session state if available
+    return st.session_state.get('optimization_results', None)
+
+
+def render_results_summary(optimization_results, params):
+    """Display all optimization results, metrics, and visualizations."""
+    if optimization_results is None:
+        return
+
+    summary_df = optimization_results['summary_df']
+    daily_df = optimization_results['daily_df']
+    detailed_results = optimization_results['detailed_results']
+    best_size = optimization_results['best_size']
+    df_run = optimization_results['df_run']
+    battery_sizes = optimization_results['battery_sizes']
+    run_type = optimization_results['run_type']
+    T = int(params['ptu_count'])
+
+    # with st.expander("Results exploration", expanded=True):        
     with st.expander("Battery size sweep results (click to show)", expanded=False):
         if len(battery_sizes) > 1:
             # --- Cost plot ---
@@ -660,15 +683,12 @@ if summary_df is not None:
 
     # --- Select day to display ---
     day_to_show = 1
-    daily_display = daily_df[(daily_df['day'] == day_to_show) & 
+    daily_display = daily_df[(daily_df['day'] == day_to_show) &
                         (daily_df['size_mw'].round(2) == round(best_size, 2))].iloc[0]
 
-
-# -----------------------
-# Summary metrics
-# -----------------------
-
-if summary_df is not None and best_size is not None:
+    # -----------------------
+    # Summary metrics
+    # -----------------------
     st.subheader("Summary results")
 
     # Pick the best row (by size)
@@ -714,7 +734,7 @@ if summary_df is not None and best_size is not None:
         idle_low50_per_day.append(np.sum(idle_mask & (soc_pct < 50)) * params['dt'])
         idle_high50_per_day.append(np.sum(idle_mask & (soc_pct >= 50)) * params['dt'])
 
-    cycles_per_day = np.sum(battery_power_positive) * params['dt'] / (best_size * params['duration_hrs']) / len(detailed_results) 
+    cycles_per_day = np.sum(battery_power_positive) * params['dt'] / (best_size * params['duration_hrs']) / len(detailed_results)
 
     # Display metrics in 4 columns
     col1, col2, col3, col4 = st.columns(4)
@@ -742,7 +762,7 @@ if summary_df is not None and best_size is not None:
         # --- Plot idle hours ---
         fig_idle = plot_idle_hours(detailed_results, best_size, params)
         st.pyplot(fig_idle)
-    
+
 
     if run_type == "Full year":
         # --- Daily summary Plot ---
@@ -768,7 +788,7 @@ if summary_df is not None and best_size is not None:
         'price_eur_mwh': df_run['use_price'].values[:T],
         'feedin_eur_mwh': df_run['inject_price'].values[:T],
     })
-    
+
     # --- Create CSV with parameters as first row ---
     output = io.StringIO()
     output.write(f"# Simulation parameters: {params_json}\n")
@@ -786,8 +806,8 @@ if summary_df is not None and best_size is not None:
     idle_total_per_day = []
     idle_low_per_day = []
     idle_high_per_day = []
-    # get the selected max power of the battery   
-    # best_size = best_summary_row['size_mw'] 
+    # get the selected max power of the battery
+    # best_size = best_summary_row['size_mw']
     for day_results in detailed_results.values():
         P = np.array(day_results['P'])
         SoC = np.array(day_results['SoC'])
@@ -829,7 +849,10 @@ if summary_df is not None and best_size is not None:
 
     # Peak import
     peak_import_with_batt = daily_df[daily_df['size_mw'].round(2) == round(best_size,2)]['peak_import_with_batt'].max()
-    peak_import_without_batt = load_arr.max()
+
+    # Need to get uploaded and pv_multiplier from optimization_results
+    uploaded = optimization_results.get('uploaded')
+    pv_multiplier = optimization_results.get('pv_multiplier', 0.0)
 
     # Build export DataFrame with new columns and order
     exp_summary_df = pd.DataFrame([{
@@ -869,4 +892,39 @@ if summary_df is not None and best_size is not None:
         "text/csv"
     )
 
+
+# -----------------------
+# Main App
+# -----------------------
+
+def main():
+    """Main Streamlit app entry point."""
+    st.set_page_config(layout="wide", page_title="BTM BESS optimiser and business case")
+    st.title("BTM BESS optimiser and business case")
+    st.write("Otto Fabius - Sympower - September 2025")
+
+    # Get user inputs from sidebar
+    params = get_user_inputs()
+    T = int(params["ptu_count"])
+
+    # 1. Data input
+    with st.expander("1. Input data", expanded=True):
+        df, uploaded, pv_multiplier = render_data_input_section(params)
+
+    # 2. Yearly overview (if uploaded)
+    render_yearly_overview_section(df, uploaded)
+
+    # 3. Daily profile inspector
+    render_daily_profile_inspector(df, T)
+
+    # 4. Optimization
+    with st.expander("Optimisation", expanded=True):
+        optimization_results = render_optimization_section(df, params, uploaded, pv_multiplier)
+
+    # 5. Results (if available)
+    render_results_summary(optimization_results, params)
+
+
+if __name__ == "__main__":
+    main()
 
