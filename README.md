@@ -3,7 +3,7 @@
 A Streamlit-based tool for optimizing Behind-The-Meter (BTM) Battery Energy Storage System (BESS) sizing and analyzing business case viability.
 
 **Author:** Otto Fabius - Sympower
-**Last Updated:** September 2025
+**Last Updated:** October 2025
 
 ---
 
