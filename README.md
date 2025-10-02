@@ -23,6 +23,9 @@ The optimizer considers day-ahead energy prices, grid fees, demand charges, PV g
 
 ### For Users
 
+Access the tool here
+https://ofabius-spw-btm-bess-btm-bess-businesscase-calculator-nh9szq.streamlit.app/
+
 - **Multiple data input options:**
   - Upload real CSV data (load, PV, prices, grid fees)
   - Generate synthetic profiles from predefined scenarios
