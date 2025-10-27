@@ -33,11 +33,10 @@ def get_user_inputs():
     st.sidebar.subheader("Operational settings")
     soc_init_pct = st.sidebar.number_input("Start SoC (%)", value=40, step=1, min_value=0, max_value=100, format="%d")
     st.sidebar.write("40% is roughly optimal for default settings for load, PV and duck curve prices.")
-    apply_curtailment = st.sidebar.checkbox("Apply PV curtailment (no grid export)", value=False)
-    st.sidebar.write("When enabled, PV generation is curtailed to prevent grid export in both with/without battery cases.")
+    apply_curtailment = st.sidebar.checkbox("Apply PV curtailment (no grid export allowed)", value=False)
     import_cap = st.sidebar.number_input("Import cap (mw)", value=50., step=0.1)
     export_cap = st.sidebar.number_input("Export cap (mw) ", value=50., step=0.1)
-    demand_charge = st.sidebar.number_input("Demand (peak) charge (k€/mw/yr) - currently not implemented", value=0, max_value=0, format="%d")*1000
+    demand_charge = st.sidebar.number_input("Demand (peak) charge (k€/MW/yr) - not optimised for", value=0, step=1, format="%d")*1000
 
     with st.sidebar.expander("Fixed inputs", expanded=False):
         st.write("These are the inputs we decided not to change for the experiments. They are implemented, so adjusting them will show the effect.")
@@ -505,9 +504,17 @@ def render_data_input_section(params):
     else:
         try:
             df = pd.read_csv(uploaded)
+            # Validate required columns
+            required_cols = ['load', 'pv', 'use_price', 'inject_price', 'grid_fee']
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            if missing_cols:
+                st.error(f"❌ Missing required columns: {', '.join(missing_cols)}")
+                st.error(f"Your file has columns: {', '.join(df.columns.tolist())}")
+                st.stop()
             st.success("CSV loaded.")
         except Exception as e:
             st.error(f"Error reading CSV: {e}")
+            st.stop()
 
     # normalise load
     df['load'] = df['load']/np.mean(np.abs(df['load']))
@@ -652,6 +659,12 @@ def render_optimization_section(df, params, uploaded, pv_multiplier):
             })
         else:
             df_run = df
+
+        # --- Calculate baseline peak import (no battery) ---
+        net_no_batt = df_run['load'].values - df_run['pv'].values
+        import_no_batt = np.maximum(net_no_batt, 0.0)
+        peak_import_no_batt = np.max(import_no_batt)
+
         # --- Run yearly optimisation (1 day or full year) ---
         summary_df, daily_df, detailed_results, best_size = run_yearly_optimisation(battery_sizes, df_run, params)
 
@@ -665,7 +678,8 @@ def render_optimization_section(df, params, uploaded, pv_multiplier):
             'battery_sizes': battery_sizes,
             'run_type': run_type,
             'uploaded': uploaded,
-            'pv_multiplier': pv_multiplier
+            'pv_multiplier': pv_multiplier,
+            'peak_import_no_batt': peak_import_no_batt
         }
 
     # Return results from session state if available
@@ -684,9 +698,10 @@ def render_results_summary(optimization_results, params):
     df_run = optimization_results['df_run']
     battery_sizes = optimization_results['battery_sizes']
     run_type = optimization_results['run_type']
+    peak_import_no_batt = optimization_results['peak_import_no_batt']
     T = int(params['ptu_count'])
 
-    # with st.expander("Results exploration", expanded=True):        
+    # with st.expander("Results exploration", expanded=True):
     with st.expander("Battery size sweep results (click to show)", expanded=False):
         if len(battery_sizes) > 1:
             # --- Cost plot ---
@@ -701,11 +716,6 @@ def render_results_summary(optimization_results, params):
                 f"savings incl. capex: {summary_df['annual_cost_with_batt_incl_capex'].max()/1000:.2f} k€"
             )
 
-    # --- Select day to display ---
-    day_to_show = 1
-    daily_display = daily_df[(daily_df['day'] == day_to_show) &
-                        (daily_df['size_mw'].round(2) == round(best_size, 2))].iloc[0]
-
     # -----------------------
     # Summary metrics
     # -----------------------
@@ -715,14 +725,26 @@ def render_results_summary(optimization_results, params):
     best_row_mask = summary_df['size_mw'].round(3) == round(best_size, 3)
     best_row = summary_df[best_row_mask].iloc[0]
 
-    # Extract values
+    # Extract values from optimizer (without demand charges)
     cost_no_batt = float(best_row['annual_cost_no_batt'])
     op_cost_with_batt = float(best_row['annual_operating_cost_with_batt'])
     total_cost_with_batt = float(best_row['annual_cost_with_batt_incl_capex'])
     capex_total = float(best_row['capex_total_eur'])
     writeoff_annual = float(best_row['writeoff_annual_eur'])
 
-    # Savings
+    # Peak import
+    peak_import_with_batt = daily_df[daily_df['size_mw'].round(2) == round(best_size,2)]['peak_import_with_batt'].max()
+    peak_import_without_batt = peak_import_no_batt
+
+    # Calculate and add demand charges to costs
+    demand_charge_no_batt = peak_import_no_batt * params['demand_charge']
+    demand_charge_with_batt = peak_import_with_batt * params['demand_charge']
+
+    cost_no_batt += demand_charge_no_batt
+    op_cost_with_batt += demand_charge_with_batt
+    total_cost_with_batt += demand_charge_with_batt
+
+    # Savings (now including demand charges)
     savings_incl_capex = cost_no_batt - total_cost_with_batt
     savings_excl_capex = cost_no_batt - op_cost_with_batt
 
@@ -731,10 +753,6 @@ def render_results_summary(optimization_results, params):
 
     # 10% of net savings (excl capex)
     rev_10pct = 0.10 * savings_excl_capex
-
-    # Peak import
-    peak_import_with_batt = daily_df[daily_df['size_mw'].round(2) == round(best_size,2)]['peak_import_with_batt'].max()
-    peak_import_without_batt = daily_df[daily_df['size_mw'].round(2) == round(best_size,2)]['cost_no_batt'].max()  # optional
 
     # --- Calculate metrics from detailed results ---
     battery_power_positive = []
@@ -774,9 +792,26 @@ def render_results_summary(optimization_results, params):
 
     with st.expander(f"View battery behavior for {best_size} MW (click to show)", expanded=False):
 
+        # --- Day selector ---
+        n_days = len(detailed_results)
+        day_to_show = st.number_input(
+            "Select day to view battery behavior",
+            min_value=1,
+            max_value=n_days,
+            value=1,
+            step=1,
+            key='battery_behavior_day'
+        )
+
         # --- Plot results for selected day ---
         results_day = detailed_results[day_to_show]
-        fig = plot_battery_behavior(results_day, df_run, T, params, best_size, day_to_show)
+
+        # Slice df_run for the selected day
+        start_idx = (day_to_show - 1) * T
+        end_idx = day_to_show * T
+        df_day = df_run.iloc[start_idx:end_idx].reset_index(drop=True)
+
+        fig = plot_battery_behavior(results_day, df_day, T, params, best_size, day_to_show)
         st.pyplot(fig)
 
         # --- Plot idle hours ---
@@ -850,25 +885,34 @@ def render_results_summary(optimization_results, params):
         # fallback to first row (should not normally happen)
         best_row = summary_df.iloc[0]
 
-    # Extract annual numbers (these are the same names used in your summary_records)
+    # Extract annual numbers from optimizer (without demand charges)
     cost_no_bess = float(best_row['annual_cost_no_batt'])
     op_cost_with_bess = float(best_row['annual_operating_cost_with_batt'])
     total_cost_with_bess = float(best_row['annual_cost_with_batt_incl_capex'])
-    savings_incl_capex = float(best_row['annual_savings'])
     capex_total = float(best_row['capex_total_eur'])
     capex_annual = float(best_row['writeoff_annual_eur'])
 
-    # Compute savings excluding capex and derived metrics
+    # Peak import
+    peak_import_with_batt_export = daily_df[daily_df['size_mw'].round(2) == round(best_size,2)]['peak_import_with_batt'].max()
+
+    # Add demand charges to costs for export
+    demand_charge_no_bess = peak_import_no_batt * params['demand_charge']
+    demand_charge_with_bess = peak_import_with_batt_export * params['demand_charge']
+
+    cost_no_bess += demand_charge_no_bess
+    op_cost_with_bess += demand_charge_with_bess
+    total_cost_with_bess += demand_charge_with_bess
+
+    # Compute savings and derived metrics (now including demand charges)
+    savings_incl_capex = cost_no_bess - total_cost_with_bess
     savings_excl_capex = cost_no_bess - op_cost_with_bess
+
     if savings_excl_capex > 0:
         payback_years = capex_total / savings_excl_capex
     else:
         payback_years = "N/A"
 
     rev_10pct = 0.10 * savings_excl_capex
-
-    # Peak import
-    peak_import_with_batt = daily_df[daily_df['size_mw'].round(2) == round(best_size,2)]['peak_import_with_batt'].max()
 
     # Need to get uploaded and pv_multiplier from optimization_results
     uploaded = optimization_results.get('uploaded')
@@ -893,8 +937,8 @@ def render_results_summary(optimization_results, params):
         "Total savings excl capex (EUR/yr)": savings_excl_capex,
         "Total savings per MW of BESS incl capex (EUR/MW/year)": savings_incl_capex / best_size,
         "ROI (years)": payback_years,
-        "Annual peak load with BESS (MW)": peak_import_with_batt,
-        "Peak import costs (EUR/yr)": peak_import_with_batt * params["demand_charge"] * 1000,  # EUR/yr
+        "Annual peak load with BESS (MW)": peak_import_with_batt_export,
+        "Peak import costs (EUR/yr)": demand_charge_with_bess,
         "Pct self-consumption (if PV)": 'not implemented yet',
         "Idle time >50% SOC (%)": np.mean(idle_high50_per_day), # take the mean
         "Idle time <50% SOC": np.mean(idle_low50_per_day),
