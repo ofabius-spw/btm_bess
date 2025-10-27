@@ -3,7 +3,7 @@
 A Streamlit-based tool for optimizing Behind-The-Meter (BTM) Battery Energy Storage System (BESS) sizing and analyzing business case viability.
 
 **Author:** Otto Fabius - Sympower
-**Last Updated:** September 2025
+**Last Updated:** October 2025
 
 ---
 
@@ -23,8 +23,11 @@ The optimizer considers day-ahead energy prices, grid fees, demand charges, PV g
 
 ### For Users
 
+Access the tool here
+https://ofabius-spw-btm-bess-btm-bess-businesscase-calculator-nh9szq.streamlit.app/
+
 - **Multiple data input options:**
-  - Upload real CSV data (load, PV, prices, grid fees)
+  - Upload real CSV data (load, PV, prices, grid fees). See the example csv input file in this repository.
   - Generate synthetic profiles from predefined scenarios
   - Customize scenario parameters
 
