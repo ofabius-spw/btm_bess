@@ -298,6 +298,7 @@ small_penalty = st.sidebar.number_input("Small Penalty (€)", 0, 1000, 25, help
 # -----------------------------
 # Data Input (Main App)
 # -----------------------------
+st.write("User guide available at https://github.com/ofabius-spw/btm_bess/blob/main/USER_GUIDE_btm_mfrr.md")
 st.header("📥 Data Input")
 uploaded_file = st.file_uploader(
     "Upload CSV (optional)",
