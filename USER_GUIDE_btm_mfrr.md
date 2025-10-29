@@ -7,9 +7,11 @@ This application simulates a Behind-The-Meter (BTM) Battery Energy Storage Syste
 **Key Features:**
 - Simulate battery operations over multiple days with 15-minute PTUs
 - Define custom bidding strategies with time-varying prices and directions
-- Visualize market data and bidding strategy
+- Visualize market data, bidding strategy, and load forecasts
+- Analyze revenues at PTU, daily, or monthly aggregation levels
 - Calculate net revenues including penalties for underdelivery
 - Enforce realistic constraints (SoC limits, cycle limits, no grid injection)
+- Optional load forecasting to limit bids and reduce grid injection risk
 
 ---
 
@@ -50,7 +52,7 @@ Upload a CSV file with the following columns:
 
 ### 5. Bidding Strategy
 
-Define your bidding strategy in the editable table:
+Define your bidding strategy in the editable table (add or remove rows as needed):
 - **Start (h):** Start hour of period (0-23)
 - **End (h):** End hour of period (1-24)
 - **Direction:**
@@ -60,10 +62,30 @@ Define your bidding strategy in the editable table:
 - **Rest SoC:** Target state of charge during this period for active SoC management (0.0-1.0)
 - **% of max power:** Reserved for future use (currently 1.0)
 
+**Note:** You can add as many time periods as needed. The table supports dynamic rows - all rows will be used in the simulation.
+
+#### Load Forecast Settings
+
+**Limit UP bids to load forecast:**
+- When enabled, UP bids are limited to forecasted site load to reduce grid injection risk
+- Forecast is calculated as the average load for the same PTU across previous N days
+- Only affects UP regulation bids (discharge)
+- Disabled by default
+
+**Forecast lookback period (days):**
+- Number of past days to average for load forecast (1-30 days)
+- Default: 7 days
+- Only shown when "Limit UP bids to load forecast" is enabled
+- Longer periods = smoother forecast, shorter periods = more responsive to recent changes
+
 ### 6. Market Data Visualization Options
 
-- **Average Daily Prices:** Shows average prices across all days in uploaded data
-- **Select a Specific Day:** View market data for a single day
+When viewing uploaded data in the "Strategy and Market Data Visualization" expander:
+
+- **Average Daily Prices:** Shows average prices and load across all days
+  - Load displayed with mean (solid blue line) and 95% confidence interval (dotted blue lines)
+  - Helps identify typical patterns and variability
+- **Select a Specific Day:** View market data and actual load for a single day
 - **None:** Show only bidding strategy (no market overlay)
 
 ---
@@ -165,17 +187,19 @@ When enabled:
 
 ### Simulation Summary (Overview Tab)
 
-**First Row:**
-- **Net Revenue (€):** Total revenue after penalties
-- **Total Activations:** Count of accepted and executed bids
-- **Total Cycles:** Battery cycles used across simulation
-- **Total Penalties (€):** Sum of all underdelivery penalties
+**First Row - Revenue Metrics (Annualized):**
+- **Gross Revenue (€/yr):** Total revenue from delivered energy before penalties, annualized
+- **Penalties (€/yr):** Total penalties from underdelivery, annualized
+- **Net Revenue (€/yr):** Net revenue after penalties (Gross - Penalties), annualized
+- **Activations (/day):** Average number of accepted bids executed per day
 
-**Second Row:**
-- **Revenue/Day (€):** Average daily net revenue
-- **Cycle-Limited PTUs:** PTUs skipped due to cycle limit
-- **Avg Cycles/Day:** Average daily cycle usage
-- **Undelivered MWh:** Total energy not delivered due to constraints
+**Second Row - Underdelivery Diagnosis (Annualized):**
+- **Cycle Limit (MWh/yr):** Energy not delivered because daily cycle limit was reached
+- **Load Limit (MWh/yr):** Energy not delivered due to grid injection constraint (site load too low for UP bids)
+- **Low SoC (MWh/yr):** Energy not delivered due to insufficient battery charge (UP regulation)
+- **High SoC (MWh/yr):** Energy not delivered because battery was full (DOWN regulation)
+
+**Note:** All metrics are annualized by extrapolating the simulation period to 365 days. This provides a consistent basis for comparing scenarios of different durations.
 
 ### Plots (Plots Tab)
 
@@ -198,6 +222,25 @@ When enabled:
 - **Dashed line (right axis):** Site load profile in kW
 - Toggle between average daily prices or specific day view
 
+### Revenue Analysis (Revenues Section)
+
+**Flexible Time Aggregation:**
+
+Choose how to view revenue data:
+1. **Monthly Aggregates (Default):** Total revenue per month
+2. **Daily Aggregates:** Select a month to view daily revenues
+3. **PTU-level:** Select a day to view revenue per 15-minute PTU
+
+**Chart shows:**
+- **Green bars:** Gross Revenue (before penalties)
+- **Red bars:** Penalties (underdelivery costs)
+- **Blue line:** Net Revenue (Gross - Penalties)
+
+This helps identify:
+- Which time periods are most profitable
+- Impact of penalties on net revenue
+- Revenue patterns at different time scales
+
 ---
 
 ## Tips for Effective Use
@@ -208,6 +251,9 @@ When enabled:
 4. **Watch SoC:** Enable SoC Protection to maintain battery readiness between activations
 5. **Test Sensitivity:** Vary bid prices to find optimal balance between acceptance rate and revenue
 6. **Check Penalties:** High undelivered energy indicates SoC management issues
+7. **Load Forecast Limiting:** Enable "Limit UP bids to load forecast" for conservative bidding that reduces grid injection risk
+   - Compare results with/without to evaluate revenue vs. safety trade-off
+   - Adjust lookback period based on load pattern stability (7 days is a good starting point)
 
 ---
 
