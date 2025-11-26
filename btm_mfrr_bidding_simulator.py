@@ -5,23 +5,30 @@ import matplotlib.pyplot as plt
 import time
 
 # -----------------------------
+# Constants
+# -----------------------------
+TOLERANCE = 0.001  # Floating point comparison tolerance
+DEFAULT_PTU_HOURS = 0.25  # 15-minute PTUs
+DEFAULT_START_DATE = "2024-01-01 00:00:00"  # Mock data start date
+
+# -----------------------------
 # Helper functions (from your script)
 # -----------------------------
 def execute_bid_strategy_for_period(hour, strategy_df):
     """
-    Returns the bid direction, price, and rest SoC for a given hour based on strategy.
-    Returns: tuple (direction, bid_price, rest_soc)
+    Returns the bid direction, price, rest SoC, and bid power limit for a given hour based on strategy.
+    Returns: tuple (direction, bid_price, rest_soc, bid_power_limit_mw)
     """
     for _, row in strategy_df.iterrows():
         if row["Start (h)"] <= hour < row["End (h)"]:
-            return row["Direction"], row["Price (€/MWh)"], row["Rest SoC"]
-    return "UP", 500, 0.5  # fallback defaults
+            return row["Direction"], row["Price (€/MWh)"], row["Rest SoC"], row["Bid Size (MW)"]
+    return "UP", 500, 0.5, 1.0  # fallback defaults
 
 def generate_mock_data(ptus_per_day, num_days, battery_p_mw, ptu_hours):
     num_ptus_total = ptus_per_day * num_days
 
-    # Generate timestamps starting from Jan 1, 2024
-    start_date = pd.Timestamp("2024-01-01 00:00:00")
+    # Generate timestamps starting from default date
+    start_date = pd.Timestamp(DEFAULT_START_DATE)
     ptu_duration = pd.Timedelta(hours=ptu_hours)
     timestamps = pd.date_range(start=start_date, periods=num_ptus_total, freq=ptu_duration)
 
@@ -78,13 +85,6 @@ def load_and_validate_csv(uploaded_file):
         st.error(f"Error loading CSV: {str(e)}")
         return None
 
-def cap_deliverable_up(bid_mw, load_prev):
-    """
-    Legacy function - caps bid size by load.
-    Note: This is no longer used in main simulation.
-    Bid sizing is now handled explicitly in forecast limiting logic.
-    """
-    return min(bid_mw, load_prev)
 
 def forecast_load(load_array, ptu_idx, ptus_per_day, lookback_days):
     """
@@ -146,7 +146,13 @@ def execute_activation(soc, bid_power, deliverable_mw, ptu_hours, battery, bid_d
     baseline_load_mw: C&I load from last non-activated PTU (MW)
     actual_load_mw: Current PTU's actual C&I load (MW)
     """
-    activated = bid_price <= cleared_price
+    # Activation logic is direction-dependent:
+    # UP: activated when our bid price is at or below market (bid_price <= cleared_price)
+    # DOWN: activated when market price is at or below our bid (cleared_price <= bid_price)
+    if bid_direction == "UP":
+        activated = bid_price <= cleared_price
+    else:  # DOWN
+        activated = cleared_price <= bid_price
 
     # Calculate the activation target energy
     activation_target_energy = deliverable_mw * ptu_hours
@@ -187,10 +193,10 @@ def execute_activation(soc, bid_power, deliverable_mw, ptu_hours, battery, bid_d
             undelivered_energy = market_obligation - delivered_energy
 
             # Determine underdelivery reason (priority: load limit, then SoC limit)
-            if undelivered_energy > 0.001:  # Small tolerance for floating point
-                if deliverable_energy < market_obligation - 0.001:
+            if undelivered_energy > TOLERANCE:
+                if deliverable_energy < market_obligation - TOLERANCE:
                     underdelivery_reason = "load_limit"
-                elif delivered_energy < deliverable_energy - 0.001:
+                elif delivered_energy < deliverable_energy - TOLERANCE:
                     underdelivery_reason = "soc_limit_low"
                 else:
                     underdelivery_reason = "other"
@@ -216,7 +222,7 @@ def execute_activation(soc, bid_power, deliverable_mw, ptu_hours, battery, bid_d
 
             # Calculate underdelivery and determine reason for DOWN direction
             undelivered_energy = requested_energy - delivered_energy
-            if undelivered_energy > 0.001:  # Small tolerance for floating point
+            if undelivered_energy > TOLERANCE:
                 underdelivery_reason = "soc_limit_high"
             else:
                 underdelivery_reason = None
@@ -235,7 +241,7 @@ def recover_rest_soc(soc, rest_soc, battery, ptu_hours, load_mw):
 
     Returns: (energy_moved, new_soc, cycles_increment)
     """
-    if abs(soc - rest_soc) < 0.001:  # Already at rest SoC (within tolerance)
+    if abs(soc - rest_soc) < TOLERANCE:  # Already at rest SoC (within tolerance)
         return 0.0, soc, 0.0
 
     # Calculate energy needed to reach rest_soc
@@ -271,8 +277,8 @@ def plot_first_day_prices(ptus_per_day, ptu_hours, cleared_price_up, cleared_pri
 
     # Get direction and Price for each PTU
     strategy_results = [execute_bid_strategy_for_period((i*ptu_hours)%24, strategy_df) for i in range(ptus_per_day)]
-    bid_directions = np.array([direction for direction, _, _ in strategy_results])
-    bid_prices = np.array([price for _, price, _ in strategy_results])
+    bid_directions = np.array([direction for direction, _, _, _ in strategy_results])
+    bid_prices = np.array([price for _, price, _, _ in strategy_results])
 
     # Get the relevant cleared prices based on direction
     cleared_prices = np.array([cleared_price_up[i] if bid_directions[i]=="UP" else cleared_price_down[i] for i in range(ptus_per_day)])
@@ -300,6 +306,161 @@ def plot_soc(soctrace):
     st.pyplot(fig)
     plt.close(fig)
 
+def simulate_single_ptu(idx, day, ptu, soc, day_cyc, last_non_activated_idx, timestamps, load,
+                         cleared_price_up, cleared_price_down, battery, strategy_df, ptu_hours,
+                         ptus_per_day, max_cycles_per_day, soc_protection, limit_bids_to_forecast,
+                         forecast_lookback_days, limit_bids_to_actual_pct, actual_load_pct,
+                         small_penalty, imbalance_price):
+    """
+    Simulate a single PTU and return results.
+
+    Returns: tuple of (ptu_result_dict, updated_soc, cycle_increment, last_non_activated_idx,
+                       day_level_updates_dict)
+    """
+    hour = (ptu * ptu_hours) % 24
+
+    # Get bid strategy
+    bid_dir, bid_price, rest_soc, bid_power_limit_mw = execute_bid_strategy_for_period(hour, strategy_df)
+    cleared_price = cleared_price_up[idx] if bid_dir == "UP" else cleared_price_down[idx]
+
+    # Baseline and actual load
+    baseline_load = load[last_non_activated_idx]
+    actual_load = load[idx]
+
+    # Calculate load forecast if enabled
+    if limit_bids_to_forecast:
+        forecasted_load = forecast_load(load, idx, ptus_per_day, forecast_lookback_days)
+    else:
+        forecasted_load = None
+
+    # Determine deliverable MW - start with base constraints
+    deliverable_mw = min(battery["P_mw"], bid_power_limit_mw)
+
+    # Apply additional UP bid constraints if enabled
+    if bid_dir == "UP":
+        if limit_bids_to_forecast and forecasted_load is not None:
+            deliverable_mw = min(deliverable_mw, forecasted_load)
+        if limit_bids_to_actual_pct:
+            actual_load_limit = actual_load * (actual_load_pct / 100.0)
+            deliverable_mw = min(deliverable_mw, actual_load_limit)
+
+    # Check cycle limit
+    cycle_limit_reached = day_cyc >= max_cycles_per_day
+    day_undel_cycle = 0.0
+
+    if cycle_limit_reached:
+        # Skip activation - cycle limit reached
+        activated = False
+        delivered_mwh = 0
+        cyc_inc = 0
+        undel_mwh = 0
+        undel_reason = None
+        skipped = 1
+
+        # Check if bid would have been accepted
+        bid_accepted = bid_price <= cleared_price
+        if bid_accepted:
+            potential_undel = deliverable_mw * ptu_hours
+            day_undel_cycle += potential_undel
+            undel_reason = "cycle_limit"
+    else:
+        # Execute activation
+        activated, delivered_mwh, soc, cyc_inc, undel_mwh, undel_reason = execute_activation(
+            soc, battery["P_mw"], deliverable_mw, ptu_hours, battery, bid_dir,
+            cleared_price, bid_price, baseline_load, actual_load
+        )
+        skipped = 0
+
+    # Update baseline
+    if not activated:
+        last_non_activated_idx = idx
+
+    # SoC Protection
+    recovery_cyc = 0.0
+    if not activated and soc_protection and not cycle_limit_reached:
+        energy_moved, soc, recovery_cyc = recover_rest_soc(soc, rest_soc, battery, ptu_hours, load[idx])
+
+        # Check if recovery cycles fit within daily limit
+        if day_cyc + recovery_cyc <= max_cycles_per_day:
+            pass  # Recovery cycles will be added by caller
+        else:
+            remaining_cycles = max_cycles_per_day - day_cyc
+            if remaining_cycles > 0:
+                recovery_cyc = remaining_cycles
+            else:
+                recovery_cyc = 0.0
+            skipped += 1
+
+    # Calculate revenue and penalty
+    ptu_revenue = calculate_ptu_revenue(delivered_mwh, cleared_price, bid_dir)
+    ptu_penalty = 0.0
+    day_undel_load = 0.0
+    day_undel_soc_low = 0.0
+    day_undel_soc_high = 0.0
+
+    if undel_mwh > 0:
+        # Track by reason
+        if undel_reason == "load_limit":
+            day_undel_load = undel_mwh
+        elif undel_reason == "soc_limit_low":
+            day_undel_soc_low = undel_mwh
+        elif undel_reason == "soc_limit_high":
+            day_undel_soc_high = undel_mwh
+
+        ptu_penalty = small_penalty + (undel_mwh * imbalance_price)
+
+    # Build PTU result dictionary
+    ptu_result = {
+        'timestamp': timestamps[idx],
+        'day': day + 1,
+        'ptu': ptu,
+        'hour': hour,
+        'bid_direction': bid_dir,
+        'bid_price': bid_price,
+        'cleared_price': cleared_price,
+        'activated': activated,
+        'baseline_load_mw': baseline_load,
+        'actual_load_mw': actual_load,
+        'forecasted_load_mw': forecasted_load if forecasted_load is not None else actual_load,
+        'deliverable_mw': deliverable_mw,
+        'delivered_mwh': delivered_mwh,
+        'undelivered_mwh': undel_mwh,
+        'soc': soc,
+        'ptu_revenue': ptu_revenue,
+        'ptu_penalty': ptu_penalty,
+        'cycle_increment': cyc_inc,
+        'skipped_due_to_cycle_limit': cycle_limit_reached,
+        'underdelivery_reason': undel_reason
+    }
+
+    # Day-level updates
+    day_updates = {
+        'revenue': ptu_revenue,
+        'cycles': cyc_inc + recovery_cyc,
+        'activations': 1 if activated else 0,
+        'undelivered': 1 if undel_mwh > 0 else 0,
+        'skipped': skipped,
+        'undel_energy': undel_mwh,
+        'penalty': ptu_penalty,
+        'undel_cycle': day_undel_cycle,
+        'undel_load': day_undel_load,
+        'undel_soc_low': day_undel_soc_low,
+        'undel_soc_high': day_undel_soc_high
+    }
+
+    return ptu_result, soc, last_non_activated_idx, day_updates
+
+def add_date_columns(df):
+    """
+    Add standardized date/time columns to a DataFrame with timestamp column.
+    Modifies DataFrame in place and returns it for chaining.
+    """
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['year_month'] = df['timestamp'].dt.to_period('M')
+    df['month_label'] = df['timestamp'].dt.strftime('%b %Y')
+    df['date'] = df['timestamp'].dt.date
+    return df
+
 def plot_revenue_analysis(ptu_df, aggregation_level, selected_period=None, time_range_filter=None):
     """
     Plot revenue analysis with flexible time aggregation.
@@ -312,13 +473,8 @@ def plot_revenue_analysis(ptu_df, aggregation_level, selected_period=None, time_
     """
     fig, ax = plt.subplots(figsize=(14, 6))
 
-    # Ensure timestamp is datetime
-    ptu_df['timestamp'] = pd.to_datetime(ptu_df['timestamp'])
-
-    # Add calendar month columns
-    ptu_df['year_month'] = ptu_df['timestamp'].dt.to_period('M')
-    ptu_df['month_label'] = ptu_df['timestamp'].dt.strftime('%b %Y')
-    ptu_df['date'] = ptu_df['timestamp'].dt.date
+    # Add date columns
+    ptu_df = add_date_columns(ptu_df.copy())
 
     if aggregation_level == 'ptu':
         # Filter for selected day
@@ -411,41 +567,6 @@ def plot_revenue_analysis(ptu_df, aggregation_level, selected_period=None, time_
     st.pyplot(fig)
     plt.close(fig)
 
-def plot_bid_strategy(strategy_df):
-    """
-    Plot the Prices throughout the day with different colors for UP and DOWN.
-    """
-    fig, ax = plt.subplots(figsize=(12, 4))
-
-    # Iterate through each row in the strategy
-    for _, row in strategy_df.iterrows():
-        start_h = row["Start (h)"]
-        end_h = row["End (h)"]
-        direction = row["Direction"]
-        bid_price = row["Price (€/MWh)"]
-
-        # Choose color based on direction
-        color = 'green' if direction == "UP" else 'red'
-
-        # Plot horizontal line for this period
-        ax.plot([start_h, end_h], [bid_price, bid_price],
-                color=color, linewidth=3, label=direction if start_h == 0 or direction != strategy_df.iloc[_-1]["Direction"] else "")
-
-    # Remove duplicate labels in legend
-    handles, labels = ax.get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    ax.legend(by_label.values(), by_label.keys())
-
-    ax.set_xlabel("Hour of Day")
-    ax.set_ylabel("Price (€/MWh)")
-    ax.set_title("Bidding Strategy Throughout the Day")
-    ax.set_xlim(0, 24)
-    ax.set_ylim(0, 1000)
-    ax.grid(True, alpha=0.3)
-    ax.set_xticks(range(0, 25, 2))
-
-    st.pyplot(fig)
-    plt.close(fig)
 
 # -----------------------------
 # Streamlit UI
@@ -457,16 +578,16 @@ st.sidebar.header("Simulation Settings")
 
 # Main simulation controls
 num_days = 7
-ptu_hours = 0.25 #st.sidebar.selectbox("PTU Duration (hours)", [0.25, 0.5, 1.0], index=0)
+ptu_hours = DEFAULT_PTU_HOURS
 soc_protection = st.sidebar.checkbox("Enable SoC Protection", True)
 
 # Battery specs
 st.sidebar.subheader("Battery Parameters")
 battery_p_mw = st.sidebar.number_input("Power (MW)", 0.1, 10.0, 1.0, 0.1)
 battery_depth_hours = st.sidebar.number_input("Depth (hours)", 0.5, 10.0, 2.0, 0.5)
-battery_initial_soc = 0.5 # st.sidebar.slider("Initial SoC", 0.0, 1.0, 0.5)
-battery_soc_min = 0. #st.sidebar.slider("Min SoC", 0.0, 1.0, 0.0)
-battery_soc_max = 1. #st.sidebar.slider("Max SoC", 0.0, 1.0, 1.0)
+battery_initial_soc = 0.5
+battery_soc_min = 0.0
+battery_soc_max = 1.0
 max_cycles_per_day = st.sidebar.number_input("Max Cycles per Day", 0.0, 10.0, 10.0, 0.1, help="Maximum battery cycles allowed per day (1 cycle = full discharge + full charge equivalent)")
 
 # Market parameters
@@ -488,15 +609,28 @@ uploaded_file = st.file_uploader(
 # Bidding Strategy and Data Visualization
 # -----------------------------
 with st.expander("⚙️ Define the hours, directions, Prices, and target Rest SoC ", expanded=False):
+    default_bid_size = battery_p_mw / 2
     default_strategy = pd.DataFrame({
         "Start (h)": [0, 6, 12, 17],
         "End (h)": [6, 12, 17, 24],
-        "Direction": ["DOWN", "UP", "DOWN", "UP"],
+        "Direction": ["UP", "UP", "UP", "UP"],
         "Price (€/MWh)": [400, 500, 450, 550],
-        "Rest SoC": [0.5, 0.5, 0.5, 0.5],
-        "% of max power": [1.0, 1.0, 1.0, 1.0]
+        "Rest SoC": [1.0, 1.0, 1.0, 1.0],
+        "Bid Size (MW)": [default_bid_size, default_bid_size, default_bid_size, default_bid_size]
     })
-    strategy_df = st.data_editor(default_strategy, num_rows="dynamic", use_container_width=True)
+    strategy_df = st.data_editor(
+        default_strategy,
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "Price (€/MWh)": st.column_config.NumberColumn(
+                "Price (€/MWh)",
+                help="Bid price (can be negative)",
+                min_value=None,  # Allow negative values
+                step=10
+            )
+        }
+    )
 
     # Load forecast settings
     limit_bids_to_forecast = st.checkbox(
@@ -513,6 +647,26 @@ with st.expander("⚙️ Define the hours, directions, Prices, and target Rest S
             step=1,
             help="Number of past days to average for load forecast"
         )
+    else:
+        forecast_lookback_days = 7  # Default value (not used when limit_bids_to_forecast is False)
+
+    # Perfect forecast option
+    limit_bids_to_actual_pct = st.checkbox(
+        "Limit UP bids to % of actual load (perfect forecast)",
+        False,
+        help="If enabled, UP bids will be limited to a percentage of actual load for that PTU (perfect forecast scenario)"
+    )
+    if limit_bids_to_actual_pct:
+        actual_load_pct = st.number_input(
+            "Percentage of actual load (%)",
+            min_value=1,
+            max_value=100,
+            value=50,
+            step=1,
+            help="Limit UP bids to this percentage of actual load"
+        )
+    else:
+        actual_load_pct = 100  # Default value (not used when limit_bids_to_actual_pct is False)
 
 # Integrated visualization in expander
 with st.expander("📊 Strategy and Market Data Visualization", expanded=False):
@@ -746,136 +900,44 @@ if run_sim:
             progress_bar.progress(progress)
             progress_text.text(f"Simulating day {day + 1} of {num_days}... ({progress*100:.0f}%)")
             time.sleep(0.01)  # Small delay to force UI update
+
+        # Initialize day-level accumulators
         day_rev, day_cyc, day_act, day_undel, day_skipped = 0, 0, 0, 0, 0
         day_undel_energy, day_penalty = 0.0, 0.0
         day_undel_cycle, day_undel_load, day_undel_soc_low, day_undel_soc_high = 0.0, 0.0, 0.0, 0.0
+
+        # Simulate each PTU in the day
         for ptu in range(ptus_per_day):
             idx = day * ptus_per_day + ptu
-            hour = (ptu * ptu_hours) % 24
 
-            # Get bid direction, price, and rest SoC from strategy
-            bid_dir, bid_price, rest_soc = execute_bid_strategy_for_period(hour, strategy_df)
+            # Simulate single PTU
+            ptu_result, soc, last_non_activated_idx, day_updates = simulate_single_ptu(
+                idx, day, ptu, soc, day_cyc, last_non_activated_idx, timestamps, load,
+                cleared_price_up, cleared_price_down, battery, strategy_df, ptu_hours,
+                ptus_per_day, max_cycles_per_day, soc_protection, limit_bids_to_forecast,
+                forecast_lookback_days, limit_bids_to_actual_pct, actual_load_pct,
+                small_penalty, imbalance_price
+            )
 
-            cleared_price = cleared_price_up[idx] if bid_dir == "UP" else cleared_price_down[idx]
-
-            # Baseline load: from last PTU that had NO activation
-            baseline_load = load[last_non_activated_idx]
-            actual_load = load[idx]
-
-            # Calculate load forecast if enabled
-            if limit_bids_to_forecast:
-                forecasted_load = forecast_load(load, idx, ptus_per_day, forecast_lookback_days)
-            else:
-                forecasted_load = None
-
-            if limit_bids_to_forecast and bid_dir == "UP":
-                # Limit deliverable to forecasted load
-                deliverable_mw = min(battery_p_mw, forecasted_load)
-            else:
-                # Bid full battery power (grid injection protection is handled in execute_activation)
-                deliverable_mw = battery_p_mw
-
-            # Check if cycle limit allows activation
-            cycle_limit_reached = day_cyc >= max_cycles_per_day
-
-            if cycle_limit_reached:
-                # Skip activation - cycle limit reached
-                activated = False
-                delivered_mwh = 0
-                cyc_inc = 0
-                undel_mwh = 0
-                undel_reason = None
-                day_skipped += 1
-
-                # Check if bid would have been accepted to determine if this counts as cycle_limit underdelivery
-                bid_accepted = bid_price <= cleared_price
-                if bid_accepted:
-                    # Calculate what would have been delivered if not cycle limited
-                    potential_undel = deliverable_mw * ptu_hours
-                    day_undel_cycle += potential_undel
-                    undel_reason = "cycle_limit"
-            else:
-                # Execute activation with baseline comparison
-                activated, delivered_mwh, soc, cyc_inc, undel_mwh, undel_reason = execute_activation(
-                    soc, battery_p_mw, deliverable_mw, ptu_hours, battery, bid_dir, cleared_price, bid_price, baseline_load, actual_load
-                )
-
-            # Update baseline: if not activated, this becomes the new baseline PTU
-            if not activated:
-                last_non_activated_idx = idx
-
-            # SoC Protection: recover rest_soc when not activated
-            if not activated and soc_protection and not cycle_limit_reached:
-                # Use current PTU's load to enforce no-grid-injection constraint
-                current_load = load[idx]
-                energy_moved, soc, recovery_cyc = recover_rest_soc(soc, rest_soc, battery, ptu_hours, current_load)
-
-                # Only add recovery cycles if it doesn't exceed limit
-                if day_cyc + recovery_cyc <= max_cycles_per_day:
-                    day_cyc += recovery_cyc
-                else:
-                    # Partial or no recovery due to cycle limit
-                    remaining_cycles = max_cycles_per_day - day_cyc
-                    if remaining_cycles > 0:
-                        # Allow partial recovery
-                        day_cyc += remaining_cycles
-                    day_skipped += 1
-
-            if activated:
-                day_act += 1
-            day_rev += calculate_ptu_revenue(delivered_mwh, cleared_price, bid_dir)
-            day_cyc += cyc_inc
-
-            # Track undelivered energy by reason and calculate penalty
-            ptu_penalty = 0.0
-            if undel_mwh > 0:
-                day_undel += 1
-                day_undel_energy += undel_mwh
-
-                # Track by reason (excluding cycle_limit which is handled above)
-                if undel_reason == "load_limit":
-                    day_undel_load += undel_mwh
-                elif undel_reason == "soc_limit_low":
-                    day_undel_soc_low += undel_mwh
-                elif undel_reason == "soc_limit_high":
-                    day_undel_soc_high += undel_mwh
-
-                # Calculate penalty: small fixed penalty + undelivered energy × imbalance price
-                ptu_penalty = small_penalty + (undel_mwh * imbalance_price)
-                day_penalty += ptu_penalty
-
+            # Store PTU results
+            ptu_results_list.append(ptu_result)
             soctrace.append(soc)
 
-            # Calculate PTU revenue
-            ptu_revenue = calculate_ptu_revenue(delivered_mwh, cleared_price, bid_dir)
+            # Accumulate day-level metrics
+            day_rev += day_updates['revenue']
+            day_cyc += day_updates['cycles']
+            day_act += day_updates['activations']
+            day_undel += day_updates['undelivered']
+            day_skipped += day_updates['skipped']
+            day_undel_energy += day_updates['undel_energy']
+            day_penalty += day_updates['penalty']
+            day_undel_cycle += day_updates['undel_cycle']
+            day_undel_load += day_updates['undel_load']
+            day_undel_soc_low += day_updates['undel_soc_low']
+            day_undel_soc_high += day_updates['undel_soc_high']
 
-            # Store PTU-level results
-            ptu_results_list.append({
-                'timestamp': timestamps[idx],
-                'day': day + 1,
-                'ptu': ptu,
-                'hour': hour,
-                'bid_direction': bid_dir,
-                'bid_price': bid_price,
-                'cleared_price': cleared_price,
-                'activated': activated,
-                'baseline_load_mw': baseline_load,
-                'actual_load_mw': actual_load,
-                'forecasted_load_mw': forecasted_load if forecasted_load is not None else actual_load,
-                'deliverable_mw': deliverable_mw,
-                'delivered_mwh': delivered_mwh,
-                'undelivered_mwh': undel_mwh,
-                'soc': soc,
-                'ptu_revenue': ptu_revenue,
-                'ptu_penalty': ptu_penalty,
-                'cycle_increment': cyc_inc,
-                'skipped_due_to_cycle_limit': cycle_limit_reached,
-                'underdelivery_reason': undel_reason
-            })
-
-        # Apply penalty to revenue (net revenue = gross revenue - penalties)
+        # Store day-level results
         net_revenue = day_rev - day_penalty
-
         revenues.append(net_revenue)
         cycles.append(day_cyc)
         activations.append(day_act)
@@ -962,29 +1024,29 @@ if st.session_state.simulation_results is not None:
         total_net_revenue = sum(revenues)  # Already net (gross - penalties)
 
         # Annualize all metrics (convert to per-year values)
-        gross_revenue = (total_gross_revenue / num_days) * 365
-        penalties = (total_penalties / num_days) * 365
-        net_revenue = (total_net_revenue / num_days) * 365
+        gross_revenue_annual = (total_gross_revenue / num_days) * 365
+        penalties_annual = (total_penalties / num_days) * 365
+        net_revenue_annual = (total_net_revenue / num_days) * 365
 
-        # First row: Revenue metrics
+        # First row: Revenue and operations metrics
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Gross Revenue (€/yr)", f"{gross_revenue:,.0f}", help="Gross revenue (before penalties) annualized from simulation period")
-        col2.metric("Penalties (€/yr)", f"{penalties:,.0f}", help="Total penalties from underdelivery, annualized")
-        col3.metric("Net Revenue (€/yr)", f"{net_revenue:,.0f}", help="Net revenue (after penalties) annualized from simulation period")
+        col1.metric("Gross Revenue (€/yr)", f"{gross_revenue_annual:,.0f}", help="Gross revenue (before penalties) annualized from simulation period")
+        col2.metric("Cycles per Day", f"{sum(cycles)/num_days:.2f}", help="Average battery cycles per day (1 cycle = full discharge + charge equivalent)")
+        col3.metric("Net Revenue (€/yr)", f"{net_revenue_annual:,.0f}", help="Net revenue (after penalties) annualized from simulation period")
         col4.metric("Activations (/day)", f"{sum(activations)/num_days:.1f}", help="Average number of accepted bids executed per day")
 
         # Second row: Underdelivery diagnosis (annualized)
-        undel_cycle_limit = (total_undel_cycle_limit / num_days) * 365
-        undel_load_limit = (total_undel_load_limit / num_days) * 365
-        undel_soc_low = (total_undel_soc_low / num_days) * 365
-        undel_soc_high = (total_undel_soc_high / num_days) * 365
+        undel_cycle_limit_annual = (total_undel_cycle_limit / num_days) * 365
+        undel_load_limit_annual = (total_undel_load_limit / num_days) * 365
+        undel_soc_low_annual = (total_undel_soc_low / num_days) * 365
+        undel_soc_high_annual = (total_undel_soc_high / num_days) * 365
 
         st.markdown("##### Underdelivery Diagnosis")
         col5, col6, col7, col8 = st.columns(4)
-        col5.metric("Cycle Limit (MWh/yr)", f"{undel_cycle_limit:.2f}", help="Energy not delivered because daily cycle limit was reached, annualized")
-        col6.metric("Load Limit (MWh/yr)", f"{undel_load_limit:.2f}", help="Energy not delivered due to grid injection constraint (load too low), annualized")
-        col7.metric("Low SoC (MWh/yr)", f"{undel_soc_low:.2f}", help="Energy not delivered due to insufficient battery charge (UP regulation), annualized")
-        col8.metric("High SoC (MWh/yr)", f"{undel_soc_high:.2f}", help="Energy not delivered because battery was full (DOWN regulation), annualized")
+        col5.metric("Cycle Limit (MWh/yr)", f"{undel_cycle_limit_annual:.2f}", help="Energy not delivered because daily cycle limit was reached, annualized")
+        col6.metric("Load Limit (MWh/yr)", f"{undel_load_limit_annual:.2f}", help="Energy not delivered due to grid injection constraint (load too low), annualized")
+        col7.metric("Low SoC (MWh/yr)", f"{undel_soc_low_annual:.2f}", help="Energy not delivered due to insufficient battery charge (UP regulation), annualized")
+        col8.metric("High SoC (MWh/yr)", f"{undel_soc_high_annual:.2f}", help="Energy not delivered because battery was full (DOWN regulation), annualized")
 
     # Operations Section
     with st.expander("📈 Operations", expanded=False):
@@ -1018,9 +1080,7 @@ if st.session_state.simulation_results is not None:
 
         if aggregation_level == "ptu":
             # Select specific date using calendar picker
-            ptu_df_temp = ptu_df.copy()
-            ptu_df_temp['timestamp'] = pd.to_datetime(ptu_df_temp['timestamp'])
-            ptu_df_temp['date'] = ptu_df_temp['timestamp'].dt.date
+            ptu_df_temp = add_date_columns(ptu_df.copy())
 
             # Get min/max dates for bounds
             min_date = ptu_df_temp['date'].min()
@@ -1056,10 +1116,7 @@ if st.session_state.simulation_results is not None:
                 selected_time_range = None
         elif aggregation_level == "daily":
             # Select specific month - extract available months from data
-            ptu_df_temp = ptu_df.copy()
-            ptu_df_temp['timestamp'] = pd.to_datetime(ptu_df_temp['timestamp'])
-            ptu_df_temp['year_month'] = ptu_df_temp['timestamp'].dt.to_period('M')
-            ptu_df_temp['month_label'] = ptu_df_temp['timestamp'].dt.strftime('%b %Y')
+            ptu_df_temp = add_date_columns(ptu_df.copy())
 
             # Get unique months
             available_months = ptu_df_temp.groupby('year_month')['month_label'].first().reset_index()
